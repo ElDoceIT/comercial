@@ -85,7 +85,7 @@ async def read_root():
                 </svg>
             </div>
             <h1>Portal de Comercial</h1>
-            <p>Estamos trabajando en el desarrollo del nuevo sistema de Recursos Humanos.</p>
+            <p>Estamos trabajando en el desarrollo del nuevo sistema de Comercial.</p>
             <div class="badge">🚧 Módulo en construcción</div>
         </div>
     </body>
