@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Archivos | Monitor Pautas{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <div>
+    <p class="eyebrow">Resumen</p>
+    <h1 class="page-title titulos">Archivos de ingesta</h1>
+    <p class="page-subtitle">Vista rápida de la carga y seguimiento de archivos procesados.</p>
+  </div>
+  <form method="post" action="/run-drive-process" class="home-process-form">
+    <button class="button" type="submit">Correr proceso Drive</button>
+  </form>
+</section>
+
+{% if process_message %}
+<section class="panel panel--tight process-message process-message--{{ process_status or 'ok' }}">
+  <strong>{{ process_message }}</strong>
+  <span>Origen: Google Drive</span>
+</section>
+{% endif %}
+
+<section class="stats-grid">
+  <article class="stat-card">
+    <span class="stat-label">Archivos ingesta</span>
+    <strong class="stat-value">{{ archivos_count }}</strong>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Cronogramas</span>
+    <strong class="stat-value">{{ cronogramas_count }}</strong>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Productos base</span>
+    <strong class="stat-value">{{ productos_count }}</strong>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Anunciantes</span>
+    <strong class="stat-value">{{ anunciantes_count }}</strong>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Última fecha cargada</span>
+    <strong class="stat-value stat-value--small">
+      {{ ultima_fecha_cargada.strftime("%d/%m/%Y") if ultima_fecha_cargada else "Sin datos" }}
+    </strong>
+  </article>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Trazabilidad</p>
+      <h2 class="panel-title">Archivos procesados</h2>
+    </div>
+    <span class="panel-meta">{{ archivos|length }} filas</span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Nombre archivo</th>
+          <th>Estado</th>
+          <th>Inicio</th>
+          <th>Fin</th>
+          <th>Filas procesadas</th>
+          <th>Error detalle</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for archivo in archivos %}
+        <tr>
+          <td>{{ archivo.nombre_archivo }}</td>
+          <td><span class="badge badge-{{ archivo.estado }}">{{ archivo.estado }}</span></td>
+          <td>{{ archivo.fecha_inicio_proceso.strftime("%d/%m/%Y %H:%M") if archivo.fecha_inicio_proceso else "-" }}</td>
+          <td>{{ archivo.fecha_fin_proceso.strftime("%d/%m/%Y %H:%M") if archivo.fecha_fin_proceso else "-" }}</td>
+          <td>{{ archivo.filas_procesadas if archivo.filas_procesadas is not none else "-" }}</td>
+          <td class="error-cell">{{ archivo.error_detalle or "-" }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="6" class="empty-state">No hay registros en archivos_ingesta.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,486 @@
+{% extends "base.html" %}
+
+{% block title %}Envío Monitor | Monitor Pautas{% endblock %}
+
+{% macro multi_filter(name, label, options, selected_values) %}
+<div class="field multi-filter-field" data-multi-dropdown data-filter-name="{{ name }}">
+  <span class="field-label">{{ label }}</span>
+  <button class="input multi-dropdown-button" type="button" data-dropdown-toggle aria-expanded="false">
+    <span data-dropdown-label>Todos</span>
+    <span aria-hidden="true">▾</span>
+  </button>
+  <div class="multi-dropdown-menu" data-dropdown-menu hidden>
+    <button class="button button-secondary select-all-button" type="button" data-toggle-all>Seleccionar todas</button>
+    <input class="input input--compact multi-dropdown-search" type="search" placeholder="Buscar">
+    <div class="multi-dropdown-options" data-multi-filter="{{ name }}">
+      {% for item in options %}
+      <label class="multi-dropdown-option">
+        <input type="checkbox" name="{{ name }}" value="{{ item }}" {% if not selected_values or item in selected_values %}checked{% endif %}>
+        <span>{{ item }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+<section class="dashboard-shell">
+  <header class="dashboard-header">
+    <div class="dashboard-title-block">
+      <h1 class="dashboard-title">Envío Monitor</h1>
+    </div>
+
+    <div class="dashboard-meta">
+      <span>última fecha incorporada:</span>
+      <strong>{{ ultima_fecha_cargada.strftime("%d/%m/%Y") if ultima_fecha_cargada else "sin datos" }}</strong>
+    </div>
+  </header>
+
+  <section class="dashboard-filters panel panel--tight">
+    <form method="get" action="/envio-monitor" class="filter-grid">
+      <div class="quick-date-row">
+        <a class="quick-date-button" href="/envio-monitor?fecha_desde={{ quick_date_ranges.ultimos_15.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimos_15.fecha_hasta }}">Últimos 15 días</a>
+        <a class="quick-date-button" href="/envio-monitor?fecha_desde={{ quick_date_ranges.ultimo_mes.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimo_mes.fecha_hasta }}">Último mes</a>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Fecha desde</span>
+        <input class="input" type="date" name="fecha_desde" value="{{ filters.fecha_desde }}" min="{{ min_fecha.isoformat() if min_fecha else '' }}" max="{{ max_fecha.isoformat() if max_fecha else '' }}">
+      </label>
+
+      <label class="field">
+        <span class="field-label">Fecha hasta</span>
+        <input class="input" type="date" name="fecha_hasta" value="{{ filters.fecha_hasta }}" min="{{ min_fecha.isoformat() if min_fecha else '' }}" max="{{ max_fecha.isoformat() if max_fecha else '' }}">
+      </label>
+
+      {{ multi_filter("alcance", "Alcance", filter_options.alcances, filters.alcances) }}
+      {{ multi_filter("categoria", "Categoría", filter_options.categorias, filters.categorias) }}
+      {{ multi_filter("anunciante", "Anunciante", filter_options.anunciantes, filters.anunciantes) }}
+      {{ multi_filter("tipo_dia", "Tipo día", filter_options.tipos_dia, filters.tipos_dia) }}
+
+      <div class="filter-actions">
+        <button class="button" type="submit">Filtrar</button>
+        <a class="button button-secondary" href="/envio-monitor">Limpiar</a>
+      </div>
+    </form>
+  </section>
+
+  {% if filters.prom_canal %}
+  <div class="active-filter">
+    <span>Prom.Canal: {{ filters.prom_canal }}</span>
+    <a href="/envio-monitor">quitar</a>
+  </div>
+  {% endif %}
+
+  <section class="panel panel--tight total-validation {% if total_validation.ok %}total-validation--ok{% else %}total-validation--error{% endif %}">
+    <div>
+      <p class="eyebrow">Validación</p>
+      <h2 class="panel-title">Control de totales</h2>
+    </div>
+    <div class="validation-metrics">
+      <span>Crudo <strong>{{ total_validation.raw_total }}</strong></span>
+      <span>Enriquecido <strong>{{ total_validation.joined_total }}</strong></span>
+      <span>Diferencia <strong>{{ total_validation.difference }}</strong></span>
+    </div>
+  </section>
+
+  <section class="dashboard-grid">
+    <article class="panel compact-panel dashboard-channel-summary">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Canales</p>
+          <h2 class="panel-title">Resumen por canal</h2>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table mini-table">
+          <thead>
+            <tr>
+              <th>CANAL</th>
+              <th>Duracion</th>
+              <th>Share de Canal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in channel_rows %}
+            <tr>
+              <td><span class="legend-dot" style="background: {{ row.color }}"></span>{{ row.canal }}</td>
+              <td>{{ row.duracion_total }}</td>
+              <td>{{ "%.2f"|format(row.porcentaje) }}%</td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="3" class="empty-state">No hay canales para mostrar.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <article class="panel dashboard-line-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Evolución</p>
+          <h2 class="panel-title">Cantidad de segundos por fecha y canal</h2>
+        </div>
+      </div>
+      {% if line_chart.series %}
+      <svg class="line-chart" viewBox="0 0 {{ line_chart.width }} {{ line_chart.height }}" role="img" aria-label="Cantidad de segundos por fecha y canal">
+        {% for tick in line_chart.y_labels %}
+        <line x1="{{ line_chart.plot.x }}" x2="{{ line_chart.plot.x + line_chart.plot.width }}" y1="{{ tick.y }}" y2="{{ tick.y }}" class="chart-grid-line"></line>
+        <text x="48" y="{{ tick.y + 4 }}" text-anchor="end" class="chart-axis-label">{{ tick.value }}</text>
+        {% endfor %}
+        {% for item in line_chart.x_labels %}
+        <text x="{{ item.x }}" y="{{ line_chart.height - 16 }}" text-anchor="middle" class="chart-axis-label">{{ item.label }}</text>
+        {% endfor %}
+        {% for serie in line_chart.series %}
+        <polyline points="{{ serie.polyline }}" fill="none" stroke="{{ serie.color }}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+        {% for point in serie.points %}
+        <circle cx="{{ point.x }}" cy="{{ point.y }}" r="3.5" fill="{{ serie.color }}"></circle>
+        {% endfor %}
+        {% endfor %}
+      </svg>
+      <div class="chart-legend">
+        {% for serie in line_chart.series %}
+        <span><i style="background: {{ serie.color }}"></i>{{ serie.channel }}</span>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="empty-state">No hay datos para graficar.</p>
+      {% endif %}
+    </article>
+
+    <article class="panel compact-panel dashboard-channel-seconds">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Share</p>
+          <h2 class="panel-title">Segundos por canal</h2>
+        </div>
+      </div>
+      {% if pie_segments %}
+      <div class="dashboard-pie-wrap">
+        <svg class="dashboard-pie" viewBox="0 0 220 220" role="img" aria-label="Participación de segundos por canal">
+          {% for segment in pie_segments %}
+          <path d="{{ segment.path }}" fill="{{ segment.color }}"></path>
+          {% endfor %}
+          <circle cx="110" cy="110" r="45" fill="#ffffff"></circle>
+          <text x="110" y="105" text-anchor="middle" class="pie-chart-label">Share</text>
+          <text x="110" y="127" text-anchor="middle" class="pie-chart-value">{{ channel_rows|length }} canales</text>
+        </svg>
+        <div class="chart-legend channel-seconds-legend">
+          {% for row in channel_rows %}
+          <span><i style="background: {{ row.color }}"></i>{{ row.canal }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% else %}
+      <p class="empty-state">No hay datos para graficar.</p>
+      {% endif %}
+    </article>
+
+    <article class="panel dashboard-bar-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Horario</p>
+          <h2 class="panel-title">Cantidad de Segundos por Hora de Inicio</h2>
+        </div>
+      </div>
+      {% set bar_chart = hour_chart %}
+      {% include "partials/grouped_bar_chart.html" %}
+    </article>
+
+    <article class="panel dashboard-weekday-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Semana</p>
+          <h2 class="panel-title">Cantidad de Segundos por Día de la semana</h2>
+        </div>
+      </div>
+      {% set bar_chart = weekday_chart %}
+      {% include "partials/grouped_bar_chart.html" %}
+    </article>
+
+    <aside class="panel dashboard-side-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Participación</p>
+          <h2 class="panel-title">Alcance</h2>
+        </div>
+      </div>
+      <div class="side-list">
+        {% for row in side_rows %}
+        <button class="side-list-row {% if filters.ranking_alcance == row.label %}is-active{% endif %}" type="button" data-ranking-filter="ranking_alcance" data-ranking-value="{{ row.label }}">
+          <span>{{ row.label }}</span>
+          <strong>{{ "%.2f"|format(row.porcentaje) }}%</strong>
+        </button>
+        {% else %}
+        <p class="empty-state">No hay valores de alcance.</p>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <aside class="panel dashboard-category-panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Participación</p>
+          <h2 class="panel-title">Categoría</h2>
+        </div>
+      </div>
+      <div class="side-list">
+        {% for row in category_side_rows %}
+        <button class="side-list-row {% if filters.ranking_categoria == row.label %}is-active{% endif %}" type="button" data-ranking-filter="ranking_categoria" data-ranking-value="{{ row.label }}">
+          <span>{{ row.label }}</span>
+          <strong>{{ "%.2f"|format(row.porcentaje) }}%</strong>
+        </button>
+        {% else %}
+        <p class="empty-state">No hay valores de categoría.</p>
+        {% endfor %}
+      </div>
+    </aside>
+
+    <article class="panel dashboard-main-table">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Ranking</p>
+          <h2 class="panel-title">Principales anunciantes</h2>
+        </div>
+        {% if filters.ranking_alcance or filters.ranking_categoria %}
+        <button class="button button-secondary clear-ranking-filter" type="button" data-clear-ranking-filter>Quitar filtro ranking</button>
+        {% endif %}
+        <div class="dashboard-total">
+          <span>Total segundos</span>
+          <strong>{{ total_duracion }}</strong>
+        </div>
+      </div>
+
+      <div class="table-wrap ranking-table-wrap">
+        <table class="data-table dashboard-table">
+          <thead>
+            <tr>
+              <th>Alcance</th>
+              <th>Anunciante</th>
+              <th>CANAL</th>
+              <th>Duracion seg</th>
+              <th>Share Segundos</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in main_rows %}
+            {% set detail_id = "ranking-products-" ~ loop.index %}
+            <tr class="ranking-row" data-ranking-products-toggle="{{ detail_id }}">
+              <td>{{ row.alcance }}</td>
+              <td>
+                <button class="ranking-anunciante-button" type="button" aria-expanded="false" aria-controls="{{ detail_id }}">
+                  {{ row.anunciante }}
+                </button>
+              </td>
+              <td>{{ row.canal }}</td>
+              <td>{{ row.duracion_total }}</td>
+              <td>
+                <span class="share-cell">
+                  <span class="share-bar"><span style="width: {{ row.porcentaje }}%"></span></span>
+                  <strong>{{ "%.2f"|format(row.porcentaje) }}%</strong>
+                </span>
+              </td>
+            </tr>
+            <tr class="ranking-products-row" id="{{ detail_id }}" hidden>
+              <td colspan="5">
+                <div class="ranking-products-panel">
+                  {% if row.products %}
+                  <table class="data-table ranking-products-table">
+                    <thead>
+                      <tr>
+                        <th>Producto</th>
+                        <th>Tema</th>
+                        <th>Segundos</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for product in row.products %}
+                      <tr>
+                        <td>{{ product.producto }}</td>
+                        <td>{{ product.tema }}</td>
+                        <td>{{ product.duracion_total }}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                  {% else %}
+                  <p class="empty-state">No hay productos para este anunciante.</p>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="5" class="empty-state">No hay datos para los filtros seleccionados.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+</section>
+
+<script>
+  function updateDropdownLabel(dropdown) {
+    const label = dropdown.querySelector("[data-dropdown-label]");
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const selected = checks.filter((check) => check.checked);
+    if (!label) return;
+
+    if (!selected.length) {
+      label.textContent = "Ninguno";
+    } else if (selected.length === checks.length) {
+      label.textContent = "Todos";
+    } else if (selected.length === 1) {
+      label.textContent = selected[0].value;
+    } else {
+      label.textContent = `${selected.length} seleccionados`;
+    }
+  }
+
+  document.querySelectorAll("[data-multi-dropdown]").forEach((dropdown) => {
+    const toggle = dropdown.querySelector("[data-dropdown-toggle]");
+    const menu = dropdown.querySelector("[data-dropdown-menu]");
+    if (!toggle || !menu) return;
+    const search = dropdown.querySelector(".multi-dropdown-search");
+
+    updateDropdownLabel(dropdown);
+
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const isOpen = !menu.hidden;
+      menu.hidden = isOpen;
+      toggle.setAttribute("aria-expanded", String(!isOpen));
+      if (!isOpen && search) {
+        search.value = "";
+        filterDropdownOptions(dropdown, "");
+        search.focus();
+      }
+    });
+
+    menu.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+
+    dropdown.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        updateDropdownLabel(dropdown);
+        updateToggleAllButton(dropdown);
+      });
+    });
+
+    updateToggleAllButton(dropdown);
+  });
+
+  function normalizeFilterText(value) {
+    return value
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+  }
+
+  function filterDropdownOptions(dropdown, query) {
+    const normalizedQuery = normalizeFilterText(query.trim());
+    dropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => {
+      const optionText = normalizeFilterText(option.textContent || "");
+      option.hidden = normalizedQuery && !optionText.includes(normalizedQuery);
+    });
+  }
+
+  document.querySelectorAll(".multi-dropdown-search").forEach((search) => {
+    search.addEventListener("input", () => {
+      const dropdown = search.closest("[data-multi-dropdown]");
+      if (dropdown) filterDropdownOptions(dropdown, search.value);
+    });
+  });
+
+  document.addEventListener("click", (event) => {
+    document.querySelectorAll("[data-multi-dropdown]").forEach((dropdown) => {
+      if (dropdown.contains(event.target)) return;
+      const menu = dropdown.querySelector("[data-dropdown-menu]");
+      const toggle = dropdown.querySelector("[data-dropdown-toggle]");
+      if (menu) menu.hidden = true;
+      if (toggle) toggle.setAttribute("aria-expanded", "false");
+    });
+  });
+
+  function updateToggleAllButton(dropdown) {
+    const button = dropdown.querySelector("[data-toggle-all]");
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const allSelected = checks.length > 0 && checks.every((checkbox) => checkbox.checked);
+    if (button) button.textContent = allSelected ? "Deseleccionar todas" : "Seleccionar todas";
+  }
+
+  document.querySelectorAll("[data-toggle-all]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const dropdown = button.closest("[data-multi-dropdown]");
+      const options = dropdown ? dropdown.querySelector("[data-multi-filter]") : null;
+      if (!options) return;
+      const checks = Array.from(options.querySelectorAll('input[type="checkbox"]'));
+      const shouldSelect = !checks.every((checkbox) => checkbox.checked);
+      checks.forEach((checkbox) => {
+        checkbox.checked = shouldSelect;
+      });
+      if (dropdown) {
+        updateDropdownLabel(dropdown);
+        updateToggleAllButton(dropdown);
+      }
+    });
+  });
+
+  document.querySelector('.dashboard-filters form')?.addEventListener("submit", () => {
+    document.querySelectorAll("[data-multi-dropdown]").forEach((dropdown) => {
+      const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+      if (!checks.length) return;
+
+      const allSelected = checks.every((checkbox) => checkbox.checked);
+      if (allSelected) {
+        checks.forEach((checkbox) => {
+          checkbox.disabled = true;
+        });
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-ranking-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const url = new URL(window.location.href);
+      const filterName = button.dataset.rankingFilter;
+      const filterValue = button.dataset.rankingValue;
+      if (!filterName || !filterValue) return;
+
+      if (url.searchParams.get(filterName) === filterValue) {
+        url.searchParams.delete(filterName);
+      } else {
+        url.searchParams.set(filterName, filterValue);
+      }
+      window.location.href = url.toString();
+    });
+  });
+
+  document.querySelector("[data-clear-ranking-filter]")?.addEventListener("click", () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("ranking_alcance");
+    url.searchParams.delete("ranking_categoria");
+    window.location.href = url.toString();
+  });
+
+  document.querySelectorAll("[data-ranking-products-toggle]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const detailId = row.dataset.rankingProductsToggle;
+      const detailRow = detailId ? document.getElementById(detailId) : null;
+      const button = row.querySelector(".ranking-anunciante-button");
+      if (!detailRow) return;
+
+      const isHidden = detailRow.hidden;
+      detailRow.hidden = !isHidden;
+      if (button) button.setAttribute("aria-expanded", String(isHidden));
+    });
+  });
+</script>
+{% endblock %}

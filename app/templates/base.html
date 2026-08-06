@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Monitor Pautas{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+</head>
+<body>
+  <header class="app-menu">
+    <div class="app-menu-left">
+      <a class="app-menu-link app-brand" href="/archivos">Monitor Pautas</a>
+      <a class="app-menu-link" href="/cronogramas">Cronogramas</a>
+      <a class="app-menu-link" href="/envio-monitor">Envío Monitor</a>
+      <a class="app-menu-link" href="/exportaciones">Exportaciones</a>
+      <details class="app-menu-group">
+        <summary class="app-menu-link app-menu-summary">Control</summary>
+        <div class="app-submenu">
+          <a class="app-submenu-link" href="/archivos">Archivos</a>
+          <a class="app-submenu-link" href="/productos">Productos</a>
+          <a class="app-submenu-link" href="/control-productos">Anunciantes</a>
+        </div>
+      </details>
+      <a class="app-menu-link" href="/docs">Docs</a>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <div class="container">
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <div>
+      <strong>Canal Doce</strong> &copy; 2026 | Control de Aire | <small>v1.0</small>
+    </div>
+  </footer>
+</body>
+</html>

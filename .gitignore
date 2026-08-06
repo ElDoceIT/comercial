@@ -1,0 +1,48 @@
+# Variables de entorno y secretos
+.env
+.env.*
+!.env.example
+
+# Credenciales de Google Cloud
+monitorpautas-drive-*.json
+*service-account*.json
+*service_account*.json
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Empaquetado
+build/
+dist/
+*.egg-info/
+
+# Archivos temporales y descargas locales
+tmp/
+*.log
+
+# Editores e IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Configuracion local de agentes
+.agents/
+.codex/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db

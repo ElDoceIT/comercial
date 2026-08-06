@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Cronogramas | Monitor Pautas{% endblock %}
+
+{% block content %}
+<section class="page-header page-header--split">
+  <div>
+    <p class="eyebrow">Consulta</p>
+    <h1 class="page-title titulos">Cronogramas</h1>
+    <p class="page-subtitle">Tabla simple de emisiones procesadas.</p>
+  </div>
+</section>
+
+<section class="panel panel--tight">
+  <form method="get" action="/cronogramas" class="filter-grid">
+    <label class="field">
+      <span class="field-label">Fecha</span>
+      <input class="input" type="date" name="fecha" value="{{ filters.fecha }}">
+    </label>
+
+    <label class="field">
+      <span class="field-label">Canal</span>
+      <select class="input" name="canal">
+        <option value="">Todos</option>
+        {% for item in canales %}
+        <option value="{{ item }}" {% if filters.canal == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="field field--wide">
+      <span class="field-label">Texto libre</span>
+      <input class="input" type="text" name="q" value="{{ filters.q }}" placeholder="Buscar en producto o tema">
+    </label>
+
+    <div class="filter-actions">
+      <button class="button" type="submit">Filtrar</button>
+      <a class="button button-secondary" href="/cronogramas">Limpiar</a>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Canal</th>
+          <th>Programa</th>
+          <th>Producto</th>
+          <th>Tema</th>
+          <th>Duración</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in cronogramas %}
+        <tr>
+          <td>{{ item.fecha.strftime("%d/%m/%Y") if item.fecha else "-" }}</td>
+          <td>{{ item.canal or "-" }}</td>
+          <td>{{ item.programa or "-" }}</td>
+          <td>{{ item.producto or "-" }}</td>
+          <td>{{ item.tema or "-" }}</td>
+          <td>{{ item.duracion or "-" }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="6" class="empty-state">No hay cronogramas para los filtros seleccionados.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

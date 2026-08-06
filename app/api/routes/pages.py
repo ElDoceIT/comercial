@@ -1,0 +1,3219 @@
+import csv
+import zipfile
+from io import BytesIO, StringIO
+import math
+import unicodedata
+from collections import defaultdict
+from datetime import date, timedelta
+from pathlib import Path
+from xml.sax.saxutils import escape
+from urllib.parse import parse_qs, quote
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import Integer, String, cast, func, literal, or_
+from sqlalchemy.orm import Session, aliased
+
+from app.db import get_db
+from app.core.config import get_settings
+from app.models.archivos_ingesta import ArchivoIngesta
+from app.models.base_anunciantes import BaseAnunciante
+from app.models.cronogramas import Cronograma
+from app.models.maestro_productos import MaestroProducto
+from app.models.productos_temas import ProductoTema
+from app.services.processing_service import (
+    DuplicateArchivoIngestaError,
+    ProcessingService,
+    ProcessingServiceError,
+)
+from app.services.drive_service import DriveService, DriveServiceError
+
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+router = APIRouter(include_in_schema=False)
+PIE_COLORS = [
+    "#2563eb",
+    "#0f766e",
+    "#f97316",
+    "#7c3aed",
+    "#dc2626",
+    "#059669",
+    "#ca8a04",
+    "#0891b2",
+]
+CHANNEL_COLORS = {
+    "Canal 12": "#f97316",
+    "Canal 10": "#2563eb",
+    "Telefe Córdoba": "#0f766e",
+    "Telefe Cordoba": "#0f766e",
+    "Canal 8": "#0f766e",
+    "Sin canal": "#6b7280",
+}
+WEEKDAY_LABELS = {
+    1: "Lunes",
+    2: "Martes",
+    3: "Miércoles",
+    4: "Jueves",
+    5: "Viernes",
+    6: "Sábado",
+    7: "Domingo",
+}
+TRUSTED_AUTO_ASSIGNMENT_RULES = {
+    "Regla canal",
+    "Producto aprendido",
+    "Marca aprendida",
+}
+EXPORT_CRONOGRAMAS_COLUMNS = [
+    ("Hora Inicio", "hora_inicio"),
+    ("Hora Fin", "hora_fin"),
+    ("Cod.Prod.", "cod_prod"),
+    ("Producto", "producto"),
+    ("Tema", "tema"),
+    ("Duracion", "duracion"),
+    ("T.Compra", "t_compra"),
+    ("T.Material", "t_material"),
+    ("Unnamed: 8", "columna_extra"),
+    ("Alcance", "alcance"),
+    ("Prom.Canal", "prom_canal"),
+    ("Programa", "programa"),
+    ("CANAL", "canal"),
+    ("Fecha", "fecha"),
+    ("Dia_semana", "dia_semana"),
+    ("Diadesemana", "dia_de_semana"),
+    ("Tipo_dia", "tipo_dia"),
+]
+EXPORT_CRONOGRAMAS_COMPLETA_COLUMNS = [
+    *EXPORT_CRONOGRAMAS_COLUMNS,
+    ("Producto_maestro", "producto_base"),
+    ("Alcance_base", "alcance_base"),
+    ("Categoria", "categoria"),
+]
+
+
+@router.get("/", response_class=HTMLResponse)
+def home(request: Request, db: Session = Depends(get_db)):
+    return RedirectResponse(url="/archivos", status_code=303)
+
+
+@router.post("/run-drive-process", response_class=HTMLResponse)
+def run_drive_process(db: Session = Depends(get_db)):
+    settings = get_settings()
+    drive_service = DriveService(settings)
+    service = ProcessingService()
+
+    try:
+        files = drive_service.list_xls_files()
+    except DriveServiceError as exc:
+        return RedirectResponse(
+            url=_home_process_redirect_url(
+                status="error",
+                message=str(exc),
+            ),
+            status_code=303,
+        )
+
+    if not files:
+        return RedirectResponse(
+            url=_home_process_redirect_url(
+                status="error",
+                message="No hay archivos XLS en la carpeta de Drive configurada.",
+            ),
+            status_code=303,
+        )
+
+    processed = 0
+    skipped = 0
+    failed = 0
+    for file in files:
+        file_id = str(file.get("id") or "")
+        if not file_id:
+            failed += 1
+            continue
+
+        try:
+            service.load_monitor_file_to_db(db=db, file_id=file_id)
+            processed += 1
+        except DuplicateArchivoIngestaError:
+            skipped += 1
+        except (DriveServiceError, ProcessingServiceError, Exception):
+            failed += 1
+
+    suggestions, ambiguous, missing_advertiser, unresolved = _get_auto_assignment_suggestions(
+        db
+    )
+    assignment_result = _apply_auto_assignment_suggestions(
+        db,
+        suggestions,
+        allowed_rules=TRUSTED_AUTO_ASSIGNMENT_RULES,
+    )
+
+    message = (
+        f"Drive XLS: {len(files)}. "
+        f"Procesados: {processed}. "
+        f"Ya cargados: {skipped}. "
+        f"Con error: {failed}. "
+        f"Autoasignados: {assignment_result['created']}. "
+        f"Ambiguos: {ambiguous}. "
+        f"Sin anunciante configurado: {missing_advertiser}. "
+        f"Sin regla: {unresolved}. "
+        f"Para revisar: {assignment_result['skipped_by_rule']}."
+    )
+    return RedirectResponse(
+        url=_home_process_redirect_url(status="ok", message=message),
+        status_code=303,
+    )
+
+
+def _home_process_redirect_url(*, status: str, message: str) -> str:
+    return f"/archivos?process_status={quote(status)}&process_message={quote(message)}"
+
+
+def _get_unmatched_product_rows(
+    db: Session,
+    *,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    archivo_id: int | None,
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    filas_expr = func.count(Cronograma.id).label("filas")
+    ultima_fecha_expr = func.max(Cronograma.fecha).label("ultima_fecha")
+    query = (
+        db.query(
+            Cronograma.cod_prod,
+            Cronograma.producto,
+            Cronograma.tema,
+            filas_expr,
+            duracion_expr,
+            ultima_fecha_expr,
+        )
+        .select_from(Cronograma)
+    )
+    query = _join_resolved_maestro(query, db)
+    query = query.filter(MaestroProducto.id.is_(None))
+    query = query.filter(Cronograma.producto.isnot(None))
+    query = query.filter(func.trim(Cronograma.producto) != "")
+    query = _apply_control_product_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        archivo_id=archivo_id,
+    )
+    rows = (
+        query
+        .group_by(Cronograma.cod_prod, Cronograma.producto, Cronograma.tema)
+        .order_by(duracion_expr.desc())
+        .limit(200)
+        .all()
+    )
+
+    return [
+        {
+            "cod_prod": row.cod_prod,
+            "producto": row.producto,
+            "tema": row.tema,
+            "filas": int(row.filas or 0),
+            "segundos": int(row.segundos or 0),
+            "ultima_fecha": row.ultima_fecha,
+        }
+        for row in rows
+    ]
+
+
+def _get_matched_product_rows(
+    db: Session,
+    *,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    archivo_id: int | None,
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    filas_expr = func.count(Cronograma.id).label("filas")
+    ultima_fecha_expr = func.max(Cronograma.fecha).label("ultima_fecha")
+    temas_registrados = (
+        db.query(
+            ProductoTema.id_producto.label("id_producto"),
+            _match_text_expr(ProductoTema.tema).label("tema_normalizado"),
+            func.min(ProductoTema.tema).label("tema"),
+        )
+        .filter(ProductoTema.tema.isnot(None))
+        .filter(func.trim(ProductoTema.tema) != "")
+        .group_by(
+            ProductoTema.id_producto,
+            _match_text_expr(ProductoTema.tema),
+        )
+        .subquery()
+    )
+
+    query = (
+        db.query(
+            Cronograma.cod_prod,
+            Cronograma.producto.label("producto_cronograma"),
+            Cronograma.tema.label("tema_cronograma"),
+            MaestroProducto.producto.label("producto_base"),
+            temas_registrados.c.tema.label("tema_base"),
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+            filas_expr,
+            duracion_expr,
+            ultima_fecha_expr,
+        )
+        .select_from(Cronograma)
+    )
+    query = _join_resolved_maestro(query, db)
+    query = (
+        query
+        .filter(MaestroProducto.id.isnot(None))
+        .outerjoin(
+            temas_registrados,
+            (temas_registrados.c.id_producto == MaestroProducto.id)
+            & (
+                temas_registrados.c.tema_normalizado
+                == _match_text_expr(Cronograma.tema)
+            ),
+        )
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+    )
+    query = _apply_control_product_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        archivo_id=archivo_id,
+    )
+    rows = (
+        query
+        .group_by(
+            Cronograma.cod_prod,
+            Cronograma.producto,
+            Cronograma.tema,
+            MaestroProducto.producto,
+            temas_registrados.c.tema,
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+        )
+        .order_by(ultima_fecha_expr.desc(), duracion_expr.desc())
+        .limit(200)
+        .all()
+    )
+
+    return [
+        {
+            "cod_prod": row.cod_prod,
+            "producto_cronograma": row.producto_cronograma,
+            "tema_cronograma": row.tema_cronograma,
+            "producto_base": row.producto_base,
+            "tema_base": row.tema_base,
+            "anunciante": row.anunciante,
+            "alcance": row.alcance,
+            "categoria": row.categoria,
+            "filas": int(row.filas or 0),
+            "segundos": int(row.segundos or 0),
+            "ultima_fecha": row.ultima_fecha,
+        }
+        for row in rows
+    ]
+
+
+def _apply_control_product_filters(
+    query,
+    *,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    archivo_id: int | None,
+):
+    if fecha_desde:
+        query = query.filter(Cronograma.fecha >= fecha_desde)
+    if fecha_hasta:
+        query = query.filter(Cronograma.fecha <= fecha_hasta)
+    if archivo_id:
+        query = query.filter(Cronograma.archivo_ingesta_id == archivo_id)
+
+    return query
+
+
+def _get_distinct_base_anunciante_values(db: Session, column) -> list[str]:
+    return _clean_multi_values(
+        [
+            row[0]
+            for row in db.query(column)
+            .filter(column.isnot(None))
+            .distinct()
+            .order_by(column.asc())
+            .all()
+        ]
+    )
+
+
+def _normalize_match_text(value: object) -> str:
+    text = str(value or "").upper().strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return " ".join(text.split())
+
+
+def _match_text_expr(column):
+    """Normalize SQL text under one collation for cross-table comparisons."""
+    return func.lower(func.trim(column)).collate("utf8mb4_unicode_ci")
+
+
+def _join_resolved_maestro(query, db: Session):
+    """Join one master, preferring its name over an unambiguous historical code."""
+    unique_codes = (
+        db.query(
+            ProductoTema.cod_producto.label("cod_producto"),
+            func.min(ProductoTema.id_producto).label("id_producto"),
+        )
+        .filter(ProductoTema.cod_producto.isnot(None))
+        .filter(func.trim(ProductoTema.cod_producto) != "")
+        .group_by(ProductoTema.cod_producto)
+        .having(func.count(func.distinct(ProductoTema.id_producto)) == 1)
+        .subquery()
+    )
+    maestro_por_nombre = aliased(MaestroProducto)
+
+    return (
+        query
+        .outerjoin(
+            maestro_por_nombre,
+            _match_text_expr(Cronograma.producto)
+            == _match_text_expr(maestro_por_nombre.producto),
+        )
+        .outerjoin(
+            unique_codes,
+            _match_text_expr(Cronograma.cod_prod)
+            == _match_text_expr(unique_codes.c.cod_producto),
+        )
+        .outerjoin(
+            MaestroProducto,
+            MaestroProducto.id
+            == func.coalesce(maestro_por_nombre.id, unique_codes.c.id_producto),
+        )
+    )
+
+
+SIGNIFICANT_WORD_STOPLIST = {
+    "ACCION",
+    "ALIMENTOS",
+    "ANALGESICO",
+    "AVISO",
+    "CANAL",
+    "COMPRAS",
+    "CORDOBA",
+    "CREMA",
+    "FLEX",
+    "INSTITUCIONAL",
+    "JABON",
+    "LIQUIDO",
+    "MARCA",
+    "NACIONAL",
+    "OLOR",
+    "PRODUCTO",
+    "PROM",
+    "PROMO",
+    "PROMOCION",
+    "PUBLICIDAD",
+    "RAPIDA",
+    "SERVICIO",
+    "SIN",
+    "SPOT",
+    "SUPERMERCADO",
+    "TELEVISION",
+    "TV",
+}
+
+LEARNED_BRAND_WEAK_TOKENS = SIGNIFICANT_WORD_STOPLIST | {
+    "ABIERTO",
+    "AHORA",
+    "BUEN",
+    "BUENA",
+    "BUENOS",
+    "CASA",
+    "COMERCIAL",
+    "COMERCIALIZADORA",
+    "CORDOBES",
+    "CORDOBESA",
+    "DESCUENTO",
+    "DIA",
+    "ENCUENTRO",
+    "ENVIOS",
+    "ENVASADO",
+    "ESPACIO",
+    "ESPECIAL",
+    "FAMILIA",
+    "FINAL",
+    "GAS",
+    "GRAN",
+    "GRUPO",
+    "HOGAR",
+    "LINEA",
+    "MARTES",
+    "MAYO",
+    "MEGA",
+    "MES",
+    "NUEVA",
+    "NUEVO",
+    "OFERTA",
+    "OFERTAS",
+    "ONLINE",
+    "PLAN",
+    "PLAZA",
+    "PLUS",
+    "PRECIOS",
+    "PRIMAVERA",
+    "SABADO",
+    "SEMANAL",
+    "TEMPORADA",
+    "TODO",
+    "VAMOS",
+    "VENTA",
+    "VIERNES",
+}
+
+
+def _significant_tokens(value: object) -> set[str]:
+    text = _normalize_match_text(value)
+    cleaned = "".join(character if character.isalnum() else " " for character in text)
+    return {
+        token
+        for token in cleaned.split()
+        if len(token) >= 4
+        and not token.isdigit()
+        and token not in LEARNED_BRAND_WEAK_TOKENS
+    }
+
+
+def _learnable_product_tokens(value: object) -> list[str]:
+    text = _normalize_match_text(value)
+    cleaned = "".join(character if character.isalnum() else " " for character in text)
+    tokens = []
+    for token in cleaned.split():
+        if len(token) < 3 or token.isdigit() or token in SIGNIFICANT_WORD_STOPLIST:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _learned_product_signatures(value: object) -> set[str]:
+    tokens = _learnable_product_tokens(value)
+    signatures = set(tokens)
+    signatures.update(
+        f"{left} {right}"
+        for left, right in zip(tokens, tokens[1:])
+    )
+    signatures.update(
+        f"{first} {second} {third}"
+        for first, second, third in zip(tokens, tokens[1:], tokens[2:])
+    )
+    return signatures
+
+
+def _is_specific_learned_signature(signature: str, distinct_products: int) -> bool:
+    tokens = signature.split()
+    if not tokens:
+        return False
+
+    weak_count = sum(token in LEARNED_BRAND_WEAK_TOKENS for token in tokens)
+    strong_tokens = [token for token in tokens if token not in LEARNED_BRAND_WEAK_TOKENS]
+    if not strong_tokens:
+        return False
+
+    if len(tokens) == 1:
+        token = tokens[0]
+        if token in LEARNED_BRAND_WEAK_TOKENS:
+            return False
+        if len(token) <= 3:
+            return distinct_products >= 4
+        return distinct_products >= 2
+
+    if weak_count:
+        return len(strong_tokens) >= 1 and distinct_products >= 2
+
+    return any(len(token) >= 5 for token in tokens)
+
+
+def _has_prom_canal_category(anunciante: BaseAnunciante) -> bool:
+    category = _normalize_match_text(anunciante.categoria)
+    return "PROM" in category and "CANAL" in category
+
+
+def _find_channel_anunciantes(
+    anunciantes: list[BaseAnunciante],
+) -> dict[str, BaseAnunciante]:
+    matches: dict[str, list[BaseAnunciante]] = {
+        "telefe": [],
+        "artear": [],
+        "canal10": [],
+        "canal12": [],
+    }
+
+    for anunciante in anunciantes:
+        name = _normalize_match_text(anunciante.anunciante)
+        if "TELEFE" in name:
+            matches["telefe"].append(anunciante)
+        if "ARTEAR" in name:
+            matches["artear"].append(anunciante)
+        if "CANAL" in name and "10" in name:
+            matches["canal10"].append(anunciante)
+        if ("CANAL" in name and "12" in name) or "DOCE" in name:
+            matches["canal12"].append(anunciante)
+
+    selected = {}
+    for key, rows in matches.items():
+        if rows:
+            selected[key] = sorted(
+                rows,
+                key=lambda row: (
+                    not _has_prom_canal_category(row),
+                    _channel_anunciante_rank(key, row),
+                    _normalize_match_text(row.anunciante),
+                    row.id_anunciante,
+                ),
+            )[0]
+
+    return selected
+
+
+def _channel_anunciante_rank(key: str, anunciante: BaseAnunciante) -> int:
+    name = _normalize_match_text(anunciante.anunciante)
+    if key == "telefe" and "CORDOBA" in name:
+        return 0
+    if key == "artear" and "PROMOCION CANAL" in name:
+        return 0
+    if key == "canal10" and "CANAL 10 CORDOBA" in name:
+        return 0
+    if key == "canal12" and ("CANAL 12" in name or "DOCE" in name):
+        return 0
+    return 1
+
+
+def _is_generic_channel_product(producto: object) -> bool:
+    product_text = _normalize_match_text(producto)
+    generic_patterns = (
+        "IDENTIFICACION DEL CANAL",
+        "PROMOCION CANAL",
+        "PROMO CANAL",
+    )
+    return any(pattern in product_text for pattern in generic_patterns)
+
+
+def _has_closed_channel_rule(producto: object) -> bool:
+    product_text = _normalize_match_text(producto)
+    return any(
+        phrase in product_text
+        for phrase in (
+            "TELEFE PROMOCION CANAL",
+            "CANAL 10 CORDOBA",
+            "ARTEAR PROMOCION CANAL",
+        )
+    )
+
+
+def _resolve_channel_promo_key(producto: object, canal: object) -> str | None:
+    product_text = _normalize_match_text(producto)
+
+    if "TELEFE" in product_text:
+        return "telefe"
+    if "ARTEAR" in product_text:
+        return "artear"
+    if "CANAL 10" in product_text:
+        return "canal10"
+    if "CANAL 12" in product_text or "EL DOCE" in product_text:
+        return "canal12"
+    if "CANAL 8" in product_text:
+        return "telefe"
+
+    if not _is_generic_channel_product(producto):
+        return None
+
+    channel_text = _normalize_match_text(canal)
+    if "CANAL 10" in channel_text:
+        return "canal10"
+    if "CANAL 12" in channel_text or "DOCE" in channel_text:
+        return "canal12"
+    if "CANAL 8" in channel_text or "TELEFE" in channel_text:
+        return "telefe"
+
+    return None
+
+
+def _score_word_match(
+    producto: object,
+    anunciante: BaseAnunciante,
+    advertiser_token_counts: dict[str, int],
+    rare_token_threshold: int,
+) -> tuple[int, set[str]]:
+    product_tokens = _significant_tokens(producto)
+    advertiser_tokens = _significant_tokens(anunciante.anunciante)
+    overlap = {
+        token
+        for token in product_tokens & advertiser_tokens
+        if advertiser_token_counts.get(token, 0) <= rare_token_threshold
+    }
+    if not overlap:
+        return 0, set()
+
+    advertiser_order = [
+        token
+        for token in _normalize_match_text(anunciante.anunciante).split()
+        if token in advertiser_tokens
+    ]
+    first_token = advertiser_order[0] if advertiser_order else None
+    if first_token not in overlap:
+        return 0, set()
+
+    longest_token = max(len(token) for token in overlap)
+    score = (len(overlap) * 100) + longest_token
+    if first_token in overlap:
+        score += 50
+    return score, overlap
+
+
+def _build_advertiser_token_counts(
+    anunciantes: list[BaseAnunciante],
+) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for anunciante in anunciantes:
+        for token in _significant_tokens(anunciante.anunciante):
+            counts[token] += 1
+    return counts
+
+
+def _get_learned_product_matches(
+    db: Session,
+) -> dict[str, list[dict[str, object]]]:
+    rows = (
+        db.query(
+            MaestroProducto.producto,
+            MaestroProducto.id_anunciante,
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+        )
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+        .filter(MaestroProducto.producto.isnot(None))
+        .filter(MaestroProducto.producto != "")
+        .filter(MaestroProducto.id_anunciante.isnot(None))
+        .all()
+    )
+
+    learned: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        key = _normalize_match_text(row.producto)
+        if not key:
+            continue
+        learned[key].append(
+            {
+                "id_anunciante": row.id_anunciante,
+                "anunciante": row.anunciante,
+                "alcance": row.alcance,
+                "categoria": row.categoria,
+            }
+        )
+    return learned
+
+
+def _get_learned_brand_matches(
+    db: Session,
+) -> dict[str, list[dict[str, object]]]:
+    rows = (
+        db.query(
+            MaestroProducto.producto,
+            MaestroProducto.id_anunciante,
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+        )
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+        .filter(MaestroProducto.producto.isnot(None))
+        .filter(MaestroProducto.producto != "")
+        .filter(MaestroProducto.id_anunciante.isnot(None))
+        .filter(BaseAnunciante.anunciante.isnot(None))
+        .all()
+    )
+
+    learned: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        for signature in _learned_product_signatures(row.producto):
+            learned[signature].append(
+                {
+                    "producto": row.producto,
+                    "id_anunciante": row.id_anunciante,
+                    "anunciante": row.anunciante,
+                    "alcance": row.alcance,
+                    "categoria": row.categoria,
+                }
+            )
+    return learned
+
+
+def _resolve_learned_product_match(
+    producto: object,
+    learned_product_matches: dict[str, list[dict[str, object]]],
+) -> dict[str, object] | None:
+    rows = learned_product_matches.get(_normalize_match_text(producto), [])
+    if not rows:
+        return None
+
+    target_ids = {row["id_anunciante"] for row in rows}
+    if len(target_ids) != 1:
+        return None
+
+    return rows[0]
+
+
+def _resolve_consistent_learned_signature(
+    signature: str,
+    rows: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if not rows:
+        return None
+
+    distinct_products = {
+        _normalize_match_text(row.get("producto"))
+        for row in rows
+        if row.get("producto")
+    }
+    if not _is_specific_learned_signature(signature, len(distinct_products)):
+        return None
+
+    target_names = {
+        _normalize_match_text(row["anunciante"])
+        for row in rows
+        if row.get("anunciante")
+    }
+    if len(target_names) != 1:
+        return None
+
+    counts_by_id: dict[int, int] = defaultdict(int)
+    rows_by_id: dict[int, dict[str, object]] = {}
+    for row in rows:
+        id_anunciante = int(row["id_anunciante"])
+        counts_by_id[id_anunciante] += 1
+        rows_by_id[id_anunciante] = row
+
+    selected_id = sorted(
+        counts_by_id,
+        key=lambda id_anunciante: (counts_by_id[id_anunciante], -id_anunciante),
+        reverse=True,
+    )[0]
+    selected = rows_by_id[selected_id]
+    return {
+        "id_anunciante": selected["id_anunciante"],
+        "anunciante": selected["anunciante"],
+        "alcance": selected["alcance"],
+        "categoria": selected["categoria"],
+        "evidencia": len(distinct_products),
+    }
+
+
+def _resolve_learned_brand_match(
+    producto: object,
+    learned_brand_matches: dict[str, list[dict[str, object]]],
+) -> tuple[dict[str, object] | None, str | None]:
+    scored = []
+    for signature in _learned_product_signatures(producto):
+        learned = _resolve_consistent_learned_signature(
+            signature,
+            learned_brand_matches.get(signature, []),
+        )
+        if learned is None:
+            continue
+
+        score = (len(signature.split()) * 1000) + int(learned["evidencia"])
+        scored.append((score, signature, learned))
+
+    if not scored:
+        return None, None
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    top_score, top_signature, top_learned = scored[0]
+    tied = [
+        learned
+        for score, _signature, learned in scored
+        if score == top_score
+        and int(learned["id_anunciante"]) != int(top_learned["id_anunciante"])
+    ]
+    if tied:
+        return None, "Ambiguo"
+
+    return top_learned, top_signature
+
+
+def _resolve_auto_anunciante(
+    row,
+    *,
+    anunciantes: list[BaseAnunciante],
+    channel_anunciantes: dict[str, BaseAnunciante],
+    learned_product_matches: dict[str, list[dict[str, object]]],
+    learned_brand_matches: dict[str, list[dict[str, object]]],
+    advertiser_token_counts: dict[str, int],
+    rare_token_threshold: int,
+) -> tuple[BaseAnunciante | None, str | None, str | None]:
+    channel_key = _resolve_channel_promo_key(row.producto, row.canal)
+    if channel_key is not None and channel_key in channel_anunciantes:
+        return channel_anunciantes[channel_key], "Regla canal", channel_key
+    if channel_key is not None and _has_closed_channel_rule(row.producto):
+        return None, "Regla canal sin anunciante", channel_key
+
+    learned = _resolve_learned_product_match(row.producto, learned_product_matches)
+    if learned is not None:
+        return (
+            BaseAnunciante(
+                id_anunciante=int(learned["id_anunciante"]),
+                anunciante=learned["anunciante"],
+                alcance=learned["alcance"],
+                categoria=learned["categoria"],
+            ),
+            "Producto aprendido",
+            "nombre exacto",
+        )
+
+    learned_brand, learned_signature = _resolve_learned_brand_match(
+        row.producto,
+        learned_brand_matches,
+    )
+    if learned_brand is not None:
+        return (
+            BaseAnunciante(
+                id_anunciante=int(learned_brand["id_anunciante"]),
+                anunciante=learned_brand["anunciante"],
+                alcance=learned_brand["alcance"],
+                categoria=learned_brand["categoria"],
+            ),
+            "Marca aprendida",
+            str(learned_signature),
+        )
+    if learned_signature == "Ambiguo":
+        return None, "Ambiguo", "marca aprendida"
+
+    scored = []
+    for anunciante in anunciantes:
+        score, tokens = _score_word_match(
+            row.producto,
+            anunciante,
+            advertiser_token_counts,
+            rare_token_threshold,
+        )
+        if score:
+            scored.append((score, tokens, anunciante))
+
+    if not scored:
+        return None, None, None
+
+    scored.sort(
+        key=lambda item: (
+            item[0],
+            _has_prom_canal_category(item[2]),
+            -item[2].id_anunciante,
+        ),
+        reverse=True,
+    )
+    top_score, top_tokens, top_anunciante = scored[0]
+    tied = [
+        anunciante
+        for score, _tokens, anunciante in scored
+        if score == top_score and anunciante.id_anunciante != top_anunciante.id_anunciante
+    ]
+    if tied:
+        return None, "Ambiguo", ", ".join(sorted(top_tokens))
+
+    if top_score:
+        return top_anunciante, "Palabra clave", ", ".join(sorted(top_tokens))
+
+    return None, None, None
+
+
+def _get_auto_assignment_candidates(db: Session):
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    filas_expr = func.count(Cronograma.id).label("filas")
+    query = (
+        db.query(
+            Cronograma.cod_prod,
+            Cronograma.producto,
+            Cronograma.tema,
+            Cronograma.canal,
+            filas_expr,
+            duracion_expr,
+        )
+        .select_from(Cronograma)
+    )
+    query = _join_resolved_maestro(query, db)
+    return (
+        query
+        .filter(MaestroProducto.id.is_(None))
+        .filter(Cronograma.producto.isnot(None))
+        .filter(func.trim(Cronograma.producto) != "")
+        .filter(Cronograma.cod_prod.isnot(None))
+        .filter(Cronograma.cod_prod != "")
+        .filter(Cronograma.cod_prod.op("REGEXP")("^[0-9]+$"))
+        .group_by(Cronograma.cod_prod, Cronograma.producto, Cronograma.tema, Cronograma.canal)
+        .order_by(duracion_expr.desc())
+        .all()
+    )
+
+
+def _get_pending_product_codes_by_name(
+    db: Session,
+    producto: object,
+) -> list[dict[str, object]]:
+    product_name = _normalize_match_text(producto)
+    if not product_name:
+        return []
+
+    rows = (
+        db.query(Cronograma.cod_prod, Cronograma.producto, Cronograma.tema)
+        .select_from(Cronograma)
+        .filter(Cronograma.cod_prod.isnot(None))
+        .filter(Cronograma.cod_prod != "")
+        .filter(Cronograma.cod_prod.op("REGEXP")("^[0-9]+$"))
+        .group_by(Cronograma.cod_prod, Cronograma.producto, Cronograma.tema)
+        .all()
+    )
+
+    pending_variants = {}
+    for row in rows:
+        if _normalize_match_text(row.producto) != product_name:
+            continue
+        cod_producto = int(row.cod_prod)
+        key = (cod_producto, _normalize_match_text(row.tema))
+        pending_variants[key] = {
+            "cod_producto": cod_producto,
+            "producto": row.producto,
+            "tema": row.tema,
+        }
+
+    return list(pending_variants.values())
+
+
+def _get_or_create_maestro_producto(
+    db: Session,
+    *,
+    producto: str,
+    id_anunciante: int,
+) -> tuple[MaestroProducto, bool]:
+    maestro = (
+        db.query(MaestroProducto)
+        .filter(
+            _match_text_expr(MaestroProducto.producto)
+            == producto.strip().lower()
+        )
+        .first()
+    )
+    if maestro is None:
+        maestro = MaestroProducto(
+            producto=producto.strip(),
+            id_anunciante=id_anunciante,
+        )
+        db.add(maestro)
+        db.flush()
+        return maestro, True
+
+    maestro.id_anunciante = id_anunciante
+    return maestro, False
+
+
+def _get_or_create_producto_tema(
+    db: Session,
+    *,
+    id_producto: int,
+    tema: str | None,
+    cod_producto: str | None,
+) -> tuple[ProductoTema, bool]:
+    normalized_tema = _normalize_match_text(tema)
+    query = db.query(ProductoTema).filter(
+        ProductoTema.id_producto == id_producto,
+        ProductoTema.cod_producto == cod_producto,
+    )
+    if normalized_tema:
+        query = query.filter(
+            _match_text_expr(ProductoTema.tema) == str(tema).strip().lower()
+        )
+    else:
+        query = query.filter(ProductoTema.tema.is_(None))
+
+    producto_tema = query.first()
+    if producto_tema is not None:
+        return producto_tema, False
+
+    producto_tema = ProductoTema(
+        id_producto=id_producto,
+        cod_producto=cod_producto,
+        tema=tema,
+    )
+    db.add(producto_tema)
+    return producto_tema, True
+
+
+def _build_auto_assignment_suggestions(
+    candidates,
+    *,
+    anunciantes: list[BaseAnunciante],
+    channel_anunciantes: dict[str, BaseAnunciante],
+    learned_product_matches: dict[str, list[dict[str, object]]],
+    learned_brand_matches: dict[str, list[dict[str, object]]],
+) -> tuple[list[dict[str, object]], int, int, int]:
+    by_code: dict[int, list[dict[str, object]]] = defaultdict(list)
+    missing_advertiser = 0
+    unresolved = 0
+    advertiser_token_counts = _build_advertiser_token_counts(anunciantes)
+    rare_token_threshold = max(1, min(3, math.ceil(len(anunciantes) * 0.01)))
+
+    for row in candidates:
+        anunciante, rule, detail = _resolve_auto_anunciante(
+            row,
+            anunciantes=anunciantes,
+            channel_anunciantes=channel_anunciantes,
+            learned_product_matches=learned_product_matches,
+            learned_brand_matches=learned_brand_matches,
+            advertiser_token_counts=advertiser_token_counts,
+            rare_token_threshold=rare_token_threshold,
+        )
+        if anunciante is None:
+            if rule == "Ambiguo":
+                by_code[int(row.cod_prod)].append(
+                    {
+                        "status": "ambiguous",
+                        "producto": row.producto,
+                        "tema": row.tema,
+                        "canal": row.canal,
+                        "filas": int(row.filas or 0),
+                        "segundos": int(row.segundos or 0),
+                        "detail": detail,
+                    }
+                )
+            elif _resolve_channel_promo_key(row.producto, row.canal) is not None:
+                missing_advertiser += 1
+            else:
+                unresolved += 1
+            continue
+
+        by_code[int(row.cod_prod)].append(
+            {
+                "status": "resolved",
+                "producto": row.producto,
+                "tema": row.tema,
+                "canal": row.canal,
+                "filas": int(row.filas or 0),
+                "segundos": int(row.segundos or 0),
+                "id_anunciante": anunciante.id_anunciante,
+                "anunciante": anunciante.anunciante,
+                "alcance": anunciante.alcance,
+                "categoria": anunciante.categoria,
+                "rule": rule,
+                "detail": detail,
+            }
+        )
+
+    suggestions = []
+    ambiguous = 0
+    for cod_producto, rows in by_code.items():
+        if any(row["status"] == "ambiguous" for row in rows):
+            ambiguous += 1
+            continue
+
+        resolved_rows = [row for row in rows if row["status"] == "resolved"]
+        target_ids = {row["id_anunciante"] for row in resolved_rows}
+        if not resolved_rows or len(target_ids) != 1:
+            ambiguous += 1
+            continue
+
+        selected = sorted(
+            resolved_rows,
+            key=lambda row: int(row["segundos"] or 0),
+            reverse=True,
+        )[0]
+        suggestions.append(
+            {
+                "cod_prod": cod_producto,
+                "producto": selected["producto"],
+                "tema": selected["tema"],
+                "canal": selected["canal"],
+                "filas": sum(int(row["filas"] or 0) for row in resolved_rows),
+                "segundos": sum(int(row["segundos"] or 0) for row in resolved_rows),
+                "id_anunciante": selected["id_anunciante"],
+                "anunciante": selected["anunciante"],
+                "alcance": selected["alcance"],
+                "categoria": selected["categoria"],
+                "rule": selected["rule"],
+                "detail": selected["detail"],
+            }
+        )
+
+    suggestions.sort(key=lambda row: int(row["segundos"] or 0), reverse=True)
+    return suggestions, ambiguous, missing_advertiser, unresolved
+
+
+def _get_auto_assignment_suggestion_rows(db: Session) -> list[dict[str, object]]:
+    suggestions, _ambiguous, _missing, _unresolved = _get_auto_assignment_suggestions(db)
+    return suggestions[:100]
+
+
+def _get_auto_assignment_suggestions(
+    db: Session,
+) -> tuple[list[dict[str, object]], int, int, int]:
+    anunciantes = db.query(BaseAnunciante).all()
+    channel_anunciantes = _find_channel_anunciantes(anunciantes)
+    return _build_auto_assignment_suggestions(
+        _get_auto_assignment_candidates(db),
+        anunciantes=anunciantes,
+        channel_anunciantes=channel_anunciantes,
+        learned_product_matches=_get_learned_product_matches(db),
+        learned_brand_matches=_get_learned_brand_matches(db),
+    )
+
+
+def _apply_auto_assignment_suggestions(
+    db: Session,
+    suggestions: list[dict[str, object]],
+    *,
+    allowed_rules: set[str] | None = None,
+    selected_ids_by_code: dict[int, int | None] | None = None,
+) -> dict[str, object]:
+    created = 0
+    already_exists = 0
+    skipped_by_rule = 0
+    created_codes = []
+    processed_product_names: set[str] = set()
+
+    for suggestion in suggestions:
+        rule = str(suggestion.get("rule") or "")
+        if allowed_rules is not None and rule not in allowed_rules:
+            skipped_by_rule += 1
+            continue
+
+        cod_producto = int(suggestion["cod_prod"])
+        if selected_ids_by_code is None:
+            id_anunciante = _parse_optional_int(suggestion.get("id_anunciante"))
+        else:
+            id_anunciante = selected_ids_by_code.get(cod_producto)
+        if id_anunciante is None:
+            continue
+
+        product_name = _normalize_match_text(suggestion["producto"])
+        if product_name in processed_product_names:
+            already_exists += 1
+            continue
+        processed_product_names.add(product_name)
+
+        pending_products = _get_pending_product_codes_by_name(db, suggestion["producto"])
+        if not pending_products:
+            already_exists += 1
+            continue
+
+        producto = str(suggestion["producto"] or "").strip()
+        if not producto:
+            continue
+        maestro, maestro_created = _get_or_create_maestro_producto(
+            db,
+            producto=producto,
+            id_anunciante=id_anunciante,
+        )
+        product_changed = maestro_created
+        for pending in pending_products:
+            pending_code = int(pending["cod_producto"])
+            _producto_tema, tema_created = _get_or_create_producto_tema(
+                db,
+                id_producto=maestro.id,
+                cod_producto=str(pending_code),
+                tema=str(pending["tema"] or "").strip() or None,
+            )
+            if tema_created:
+                product_changed = True
+                if pending_code not in created_codes:
+                    created_codes.append(pending_code)
+
+        if product_changed:
+            created += 1
+        else:
+            already_exists += 1
+
+    db.commit()
+    return {
+        "created": created,
+        "already_exists": already_exists,
+        "skipped_by_rule": skipped_by_rule,
+        "created_codes": created_codes,
+    }
+
+
+def _get_control_rows_by_product_codes(
+    db: Session,
+    cod_productos: list[int],
+) -> list[dict[str, object]]:
+    if not cod_productos:
+        return []
+
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    filas_expr = func.count(Cronograma.id).label("filas")
+    ultima_fecha_expr = func.max(Cronograma.fecha).label("ultima_fecha")
+    temas_registrados = (
+        db.query(
+            ProductoTema.id_producto.label("id_producto"),
+            _match_text_expr(ProductoTema.tema).label("tema_normalizado"),
+            func.min(ProductoTema.tema).label("tema"),
+        )
+        .filter(ProductoTema.tema.isnot(None))
+        .filter(func.trim(ProductoTema.tema) != "")
+        .group_by(
+            ProductoTema.id_producto,
+            _match_text_expr(ProductoTema.tema),
+        )
+        .subquery()
+    )
+
+    query = (
+        db.query(
+            Cronograma.cod_prod,
+            Cronograma.producto.label("producto_cronograma"),
+            Cronograma.tema.label("tema_cronograma"),
+            MaestroProducto.producto.label("producto_base"),
+            temas_registrados.c.tema.label("tema_base"),
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+            filas_expr,
+            duracion_expr,
+            ultima_fecha_expr,
+        )
+        .select_from(Cronograma)
+    )
+    query = _join_resolved_maestro(query, db)
+    rows = (
+        query
+        .filter(MaestroProducto.id.isnot(None))
+        .outerjoin(
+            temas_registrados,
+            (temas_registrados.c.id_producto == MaestroProducto.id)
+            & (
+                temas_registrados.c.tema_normalizado
+                == _match_text_expr(Cronograma.tema)
+            ),
+        )
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+        .filter(Cronograma.cod_prod.in_([str(code) for code in cod_productos]))
+        .group_by(
+            Cronograma.cod_prod,
+            Cronograma.producto,
+            Cronograma.tema,
+            MaestroProducto.producto,
+            temas_registrados.c.tema,
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+        )
+        .order_by(duracion_expr.desc())
+        .all()
+    )
+
+    return [
+        {
+            "cod_prod": row.cod_prod,
+            "producto_cronograma": row.producto_cronograma,
+            "tema_cronograma": row.tema_cronograma,
+            "producto_base": row.producto_base,
+            "tema_base": row.tema_base,
+            "anunciante": row.anunciante,
+            "alcance": row.alcance,
+            "categoria": row.categoria,
+            "filas": int(row.filas or 0),
+            "segundos": int(row.segundos or 0),
+            "ultima_fecha": row.ultima_fecha,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/cronogramas", response_class=HTMLResponse)
+def cronogramas_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    fecha: str | None = Query(default=None),
+    canal: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+):
+    query = db.query(Cronograma)
+
+    if fecha:
+        query = query.filter(Cronograma.fecha == fecha)
+    if canal:
+        query = query.filter(Cronograma.canal == canal)
+    if q:
+        search = f"%{q.strip()}%"
+        query = query.filter(
+            or_(Cronograma.producto.ilike(search), Cronograma.tema.ilike(search))
+        )
+
+    cronogramas = (
+        query.order_by(Cronograma.fecha.desc(), Cronograma.id.desc()).limit(300).all()
+    )
+    canales = [
+        row[0]
+        for row in db.query(Cronograma.canal)
+        .filter(Cronograma.canal.isnot(None))
+        .distinct()
+        .order_by(Cronograma.canal.asc())
+        .all()
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "cronogramas.html",
+        {
+            "cronogramas": cronogramas,
+            "filters": {"fecha": fecha or "", "canal": canal or "", "q": q or ""},
+            "canales": canales,
+        },
+    )
+
+
+@router.get("/productos", response_class=HTMLResponse)
+def productos_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    q: str | None = Query(default=None),
+    id_anunciante: str | None = Query(default=None),
+    categoria: str | None = Query(default=None),
+):
+    selected_id_anunciante = _parse_optional_int(id_anunciante)
+    query = (
+        db.query(
+            MaestroProducto.id.label("id_producto"),
+            MaestroProducto.producto,
+            MaestroProducto.id_anunciante,
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+        )
+        .select_from(MaestroProducto)
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+    )
+
+    if q:
+        search = f"%{q.strip()}%"
+        query = query.filter(
+            or_(
+                MaestroProducto.producto.ilike(search),
+                BaseAnunciante.anunciante.ilike(search),
+            )
+        )
+    if selected_id_anunciante is not None:
+        query = query.filter(MaestroProducto.id_anunciante == selected_id_anunciante)
+    if categoria:
+        query = query.filter(BaseAnunciante.categoria == categoria)
+
+    productos = (
+        query.order_by(MaestroProducto.producto.asc(), MaestroProducto.id.asc())
+        .limit(500)
+        .all()
+    )
+    anunciantes = (
+        db.query(BaseAnunciante)
+        .order_by(BaseAnunciante.anunciante.asc(), BaseAnunciante.id_anunciante.asc())
+        .all()
+    )
+    categorias = [
+        row[0]
+        for row in db.query(BaseAnunciante.categoria)
+        .filter(BaseAnunciante.categoria.isnot(None))
+        .distinct()
+        .order_by(BaseAnunciante.categoria.asc())
+        .all()
+    ]
+
+    return templates.TemplateResponse(
+        request,
+        "productos.html",
+        {
+            "productos": productos,
+            "anunciantes": anunciantes,
+            "categorias": categorias,
+            "alcances": _get_distinct_base_anunciante_values(db, BaseAnunciante.alcance),
+            "filters": {
+                "q": q or "",
+                "id_anunciante": selected_id_anunciante or "",
+                "categoria": categoria or "",
+            },
+            "status": request.query_params.get("status", ""),
+            "message": request.query_params.get("message", ""),
+        },
+    )
+
+
+@router.post("/productos/actualizar", response_class=HTMLResponse)
+async def update_producto(request: Request, db: Session = Depends(get_db)):
+    form = await _read_urlencoded_form(request)
+    producto_id = _parse_optional_int(form.get("id_producto"))
+    id_anunciante = _parse_optional_int(form.get("id_anunciante"))
+    nombre_producto = str(form.get("producto") or "").strip()
+
+    if producto_id is None or not nombre_producto:
+        return RedirectResponse(
+            url=_productos_redirect_url(status="error", message="Producto inválido."),
+            status_code=303,
+        )
+
+    producto = (
+        db.query(MaestroProducto)
+        .filter(MaestroProducto.id == producto_id)
+        .first()
+    )
+    if producto is None:
+        return RedirectResponse(
+            url=_productos_redirect_url(status="error", message="Producto no encontrado."),
+            status_code=303,
+        )
+
+    producto.producto = nombre_producto
+    producto.id_anunciante = id_anunciante
+
+    db.commit()
+
+    return RedirectResponse(
+        url=_productos_redirect_url(status="ok", message="Producto actualizado."),
+        status_code=303,
+    )
+
+
+@router.post("/anunciantes/actualizar", response_class=HTMLResponse)
+async def update_anunciante(request: Request, db: Session = Depends(get_db)):
+    form = await _read_urlencoded_form(request)
+    id_anunciante = _parse_optional_int(form.get("id_anunciante"))
+
+    if id_anunciante is None:
+        return RedirectResponse(
+            url=_productos_redirect_url(status="error", message="Anunciante inválido."),
+            status_code=303,
+        )
+
+    anunciante = (
+        db.query(BaseAnunciante)
+        .filter(BaseAnunciante.id_anunciante == id_anunciante)
+        .first()
+    )
+    if anunciante is None:
+        return RedirectResponse(
+            url=_productos_redirect_url(status="error", message="Anunciante no encontrado."),
+            status_code=303,
+        )
+
+    anunciante.anunciante = str(form.get("anunciante") or "").strip() or None
+    anunciante.alcance = str(form.get("alcance") or "").strip() or None
+    anunciante.categoria = str(form.get("categoria") or "").strip() or None
+    db.commit()
+
+    return RedirectResponse(
+        url=_productos_redirect_url(status="ok", message="Anunciante actualizado."),
+        status_code=303,
+    )
+
+
+def _productos_redirect_url(*, status: str, message: str) -> str:
+    return f"/productos?status={quote(status)}&message={quote(message)}"
+
+
+@router.get("/control-productos", response_class=HTMLResponse)
+def control_productos_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    archivo_id: str | None = Query(default=None),
+    auto_codes: str | None = Query(default=None),
+):
+    selected_archivo_id = _parse_optional_int(archivo_id)
+    auto_cod_productos = _parse_int_list(auto_codes)
+    anunciantes = (
+        db.query(BaseAnunciante)
+        .order_by(BaseAnunciante.anunciante.asc(), BaseAnunciante.id_anunciante.asc())
+        .all()
+    )
+    archivos = (
+        db.query(ArchivoIngesta)
+        .order_by(ArchivoIngesta.fecha_inicio_proceso.desc(), ArchivoIngesta.id.desc())
+        .limit(100)
+        .all()
+    )
+    min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
+    max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
+    alcances = _get_distinct_base_anunciante_values(db, BaseAnunciante.alcance)
+    categorias = _get_distinct_base_anunciante_values(db, BaseAnunciante.categoria)
+    unmatched_rows = _get_unmatched_product_rows(
+        db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        archivo_id=selected_archivo_id,
+    )
+    matched_rows = _get_matched_product_rows(
+        db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        archivo_id=selected_archivo_id,
+    )
+    auto_suggestion_rows = _get_auto_assignment_suggestion_rows(db)
+    auto_assigned_rows = _get_control_rows_by_product_codes(db, auto_cod_productos)
+
+    return templates.TemplateResponse(
+        request,
+        "control_productos.html",
+        {
+            "anunciantes": anunciantes,
+            "archivos": archivos,
+            "alcances": alcances,
+            "categorias": categorias,
+            "unmatched_rows": unmatched_rows,
+            "matched_rows": matched_rows,
+            "auto_suggestion_rows": auto_suggestion_rows,
+            "auto_assigned_rows": auto_assigned_rows,
+            "min_fecha": min_fecha,
+            "max_fecha": max_fecha,
+            "filters": {
+                "fecha_desde": fecha_desde or "",
+                "fecha_hasta": fecha_hasta or "",
+                "archivo_id": selected_archivo_id or "",
+            },
+            "status": request.query_params.get("status", ""),
+            "message": request.query_params.get("message", ""),
+        },
+    )
+
+
+@router.post("/control-productos/asignar", response_class=HTMLResponse)
+async def assign_control_producto(request: Request, db: Session = Depends(get_db)):
+    form = await _read_urlencoded_form(request)
+    cod_prod = str(form.get("cod_prod") or "").strip()
+    producto = str(form.get("producto") or "").strip() or None
+    tema = str(form.get("tema") or "").strip() or None
+    id_anunciante = _parse_optional_int(form.get("id_anunciante"))
+
+    if not producto:
+        return RedirectResponse(
+            url=_control_productos_redirect_url(
+                status="error",
+                message="El nombre del producto es obligatorio.",
+            ),
+            status_code=303,
+        )
+
+    if id_anunciante is None:
+        return RedirectResponse(
+            url=_control_productos_redirect_url(
+                status="error",
+                message="Seleccioná un anunciante para asignar el producto.",
+            ),
+            status_code=303,
+        )
+
+    maestro, maestro_created = _get_or_create_maestro_producto(
+        db,
+        producto=producto,
+        id_anunciante=id_anunciante,
+    )
+    _producto_tema, tema_created = _get_or_create_producto_tema(
+        db,
+        id_producto=maestro.id,
+        cod_producto=cod_prod or None,
+        tema=tema,
+    )
+
+    if maestro_created:
+        message = f"Producto {producto} agregado al maestro."
+    elif tema_created:
+        message = f"Tema agregado al producto {producto}."
+    else:
+        message = f"Producto {producto} actualizado."
+
+    db.commit()
+    return RedirectResponse(
+        url=_control_productos_redirect_url(status="ok", message=message),
+        status_code=303,
+    )
+
+
+@router.post("/control-productos/anunciante", response_class=HTMLResponse)
+async def create_control_anunciante(request: Request, db: Session = Depends(get_db)):
+    form = await _read_urlencoded_form(request)
+    anunciante = str(form.get("anunciante") or "").strip()
+    alcance = str(form.get("alcance") or "").strip() or None
+    categoria = str(form.get("categoria") or "").strip() or None
+
+    if not anunciante:
+        return RedirectResponse(
+            url=_control_productos_redirect_url(
+                status="error",
+                message="El nombre del anunciante es obligatorio.",
+            ),
+            status_code=303,
+        )
+
+    db.add(
+        BaseAnunciante(
+            anunciante=anunciante,
+            alcance=alcance,
+            categoria=categoria,
+        )
+    )
+    db.commit()
+    return RedirectResponse(
+        url=_control_productos_redirect_url(
+            status="ok",
+            message=f"Anunciante {anunciante} creado.",
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/control-productos/asignar-promos-canal", response_class=HTMLResponse)
+async def assign_channel_promos_and_word_matches(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    form = await _read_urlencoded_form(request)
+    suggestions, ambiguous, missing_advertiser, unresolved = _get_auto_assignment_suggestions(
+        db
+    )
+    selected_ids_by_code = {
+        int(suggestion["cod_prod"]): _parse_optional_int(
+            form.get(f"id_anunciante_{int(suggestion['cod_prod'])}")
+        )
+        for suggestion in suggestions
+    }
+    assignment_result = _apply_auto_assignment_suggestions(
+        db,
+        suggestions,
+        selected_ids_by_code=selected_ids_by_code,
+    )
+
+    message = (
+        f"Asignados automáticamente: {assignment_result['created']}. "
+        f"Ambiguos: {ambiguous}. "
+        f"Sin anunciante configurado: {missing_advertiser}. "
+        f"Sin regla: {unresolved}. "
+        f"Ya existían: {assignment_result['already_exists']}."
+    )
+    redirect_url = _control_productos_redirect_url(status="ok", message=message)
+    created_codes = assignment_result["created_codes"]
+    if created_codes:
+        code_list = ",".join(str(code) for code in created_codes[:80])
+        redirect_url = f"{redirect_url}&auto_codes={quote(code_list)}"
+
+    return RedirectResponse(
+        url=redirect_url,
+        status_code=303,
+    )
+
+
+def _control_productos_redirect_url(*, status: str, message: str) -> str:
+    return f"/control-productos?status={quote(status)}&message={quote(message)}"
+
+
+async def _read_urlencoded_form(request: Request) -> dict[str, str]:
+    body = await request.body()
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return {key: values[-1] if values else "" for key, values in parsed.items()}
+
+
+@router.get("/envio-monitor", response_class=HTMLResponse)
+def envio_monitor_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    alcance: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    anunciante: list[str] | None = Query(default=None),
+    tipo_dia: list[str] | None = Query(default=None),
+    prom_canal: str | None = Query(default=None),
+    ranking_alcance: str | None = Query(default=None),
+    ranking_categoria: str | None = Query(default=None),
+):
+    today = date.today()
+    default_fecha_desde = today - timedelta(days=8)
+    default_fecha_hasta = today - timedelta(days=1)
+    fecha_desde = fecha_desde or default_fecha_desde.isoformat()
+    fecha_hasta = fecha_hasta or default_fecha_hasta.isoformat()
+    quick_date_ranges = {
+        "ultimos_15": {
+            "fecha_desde": (today - timedelta(days=15)).isoformat(),
+            "fecha_hasta": default_fecha_hasta.isoformat(),
+        },
+        "ultimo_mes": {
+            "fecha_desde": (today - timedelta(days=30)).isoformat(),
+            "fecha_hasta": default_fecha_hasta.isoformat(),
+        },
+    }
+
+    selected_alcances = _clean_multi_values(alcance)
+    selected_categorias = _clean_multi_values(categoria)
+    selected_anunciantes = _clean_multi_values(anunciante)
+    selected_tipos_dia = _clean_multi_values(tipo_dia)
+    filter_options = _get_envio_filter_options(db)
+    selected_alcances = _normalize_all_selected(selected_alcances, filter_options["alcances"])
+    selected_categorias = _normalize_all_selected(
+        selected_categorias,
+        filter_options["categorias"],
+    )
+    selected_anunciantes = _normalize_all_selected(
+        selected_anunciantes,
+        filter_options["anunciantes"],
+    )
+    selected_tipos_dia = _normalize_all_selected(
+        selected_tipos_dia,
+        filter_options["tipos_dia"],
+    )
+    total_duracion = _get_envio_total_duration(
+        db=db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
+        tipos_dia=selected_tipos_dia,
+        prom_canal=prom_canal,
+    )
+
+    main_rows = _get_envio_main_rows(
+        db=db,
+        total_duracion=total_duracion,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
+        tipos_dia=selected_tipos_dia,
+        prom_canal=prom_canal,
+        ranking_alcance=ranking_alcance,
+        ranking_categoria=ranking_categoria,
+    )
+    product_breakdowns = _get_envio_ranking_product_rows(
+        db=db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
+        tipos_dia=selected_tipos_dia,
+        prom_canal=prom_canal,
+        ranking_alcance=ranking_alcance,
+        ranking_categoria=ranking_categoria,
+        main_rows=main_rows,
+    )
+    for row in main_rows:
+        row["products"] = product_breakdowns.get(
+            _envio_ranking_key(row["alcance"], row["anunciante"], row["canal"]),
+            [],
+        )
+    side_rows = _get_envio_side_rows(
+        db=db,
+        total_duracion=total_duracion,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
+        tipos_dia=selected_tipos_dia,
+    )
+    category_side_rows = _get_envio_category_side_rows(
+        db=db,
+        total_duracion=total_duracion,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
+        tipos_dia=selected_tipos_dia,
+    )
+    channel_rows = _get_envio_channel_rows(
+        db=db,
+        total_duracion=total_duracion,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
+        tipos_dia=selected_tipos_dia,
+        prom_canal=prom_canal,
+    )
+    line_chart = _build_line_chart(
+        _get_envio_date_channel_rows(
+            db=db,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            alcances=selected_alcances,
+            categorias=selected_categorias,
+            anunciantes=selected_anunciantes,
+            tipos_dia=selected_tipos_dia,
+            prom_canal=prom_canal,
+        )
+    )
+    hour_chart = _build_grouped_bar_chart(
+        _get_envio_hour_channel_rows(
+            db=db,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            alcances=selected_alcances,
+            categorias=selected_categorias,
+            anunciantes=selected_anunciantes,
+            tipos_dia=selected_tipos_dia,
+            prom_canal=prom_canal,
+        ),
+        label_key="hora",
+        label_order=None,
+    )
+    weekday_chart = _build_grouped_bar_chart(
+        _get_envio_weekday_channel_rows(
+            db=db,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            alcances=selected_alcances,
+            categorias=selected_categorias,
+            anunciantes=selected_anunciantes,
+            tipos_dia=selected_tipos_dia,
+            prom_canal=prom_canal,
+        ),
+        label_key="dia",
+        label_order=[WEEKDAY_LABELS[index] for index in range(1, 8)],
+    )
+    total_validation = _get_envio_total_validation(
+        db=db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        tipos_dia=selected_tipos_dia,
+        prom_canal=prom_canal,
+    )
+
+    min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
+    max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
+    ultima_fecha_cargada = db.query(func.max(Cronograma.fecha)).scalar()
+
+    return templates.TemplateResponse(
+        request,
+        "envio_monitor.html",
+        {
+            "filters": {
+                "fecha_desde": fecha_desde or "",
+                "fecha_hasta": fecha_hasta or "",
+                "alcances": selected_alcances,
+                "categorias": selected_categorias,
+                "anunciantes": selected_anunciantes,
+                "tipos_dia": selected_tipos_dia,
+                "prom_canal": prom_canal or "",
+                "ranking_alcance": ranking_alcance or "",
+                "ranking_categoria": ranking_categoria or "",
+            },
+            "filter_options": filter_options,
+            "quick_date_ranges": quick_date_ranges,
+            "min_fecha": min_fecha,
+            "max_fecha": max_fecha,
+            "ultima_fecha_cargada": ultima_fecha_cargada,
+            "total_duracion": total_duracion,
+            "main_rows": main_rows,
+            "side_rows": side_rows,
+            "category_side_rows": category_side_rows,
+            "channel_rows": channel_rows,
+            "pie_segments": _build_pie_chart_segments(channel_rows),
+            "line_chart": line_chart,
+            "hour_chart": hour_chart,
+            "weekday_chart": weekday_chart,
+            "total_validation": total_validation,
+        },
+    )
+
+
+@router.get("/exportaciones", response_class=HTMLResponse)
+def exportaciones_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+):
+    fecha_desde_value = _parse_export_date(fecha_desde)
+    fecha_hasta_value = _parse_export_date(fecha_hasta)
+    export_count = _get_export_cronogramas_query(
+        db,
+        fecha_desde=fecha_desde_value,
+        fecha_hasta=fecha_hasta_value,
+    ).count()
+    min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
+    max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
+
+    return templates.TemplateResponse(
+        request,
+        "exportaciones.html",
+        {
+            "fecha_desde": fecha_desde or "",
+            "fecha_hasta": fecha_hasta or "",
+            "min_fecha": min_fecha,
+            "max_fecha": max_fecha,
+            "export_count": export_count,
+        },
+    )
+
+
+@router.get("/exportaciones/cronogramas")
+def export_cronogramas(
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    formato: str = Query(default="csv"),
+    tipo: str = Query(default="simple"),
+) -> Response:
+    fecha_desde_value = _parse_export_date(fecha_desde)
+    fecha_hasta_value = _parse_export_date(fecha_hasta)
+    if tipo == "completa":
+        columns = EXPORT_CRONOGRAMAS_COMPLETA_COLUMNS
+        rows = _get_export_cronogramas_completa_rows(
+            db,
+            fecha_desde=fecha_desde_value,
+            fecha_hasta=fecha_hasta_value,
+        )
+    else:
+        columns = EXPORT_CRONOGRAMAS_COLUMNS
+        rows = _get_export_cronogramas_rows(
+            db,
+            fecha_desde=fecha_desde_value,
+            fecha_hasta=fecha_hasta_value,
+        )
+    file_stem = _build_export_file_stem(
+        fecha_desde=fecha_desde_value,
+        fecha_hasta=fecha_hasta_value,
+        tipo=tipo,
+    )
+
+    if formato == "xlsx":
+        content = _build_xlsx_response_content(rows, columns=columns)
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="{file_stem}.xlsx"',
+            },
+        )
+
+    content = _build_csv_response_content(rows, columns=columns)
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{file_stem}.csv"'},
+    )
+
+
+@router.get("/archivos", response_class=HTMLResponse)
+def archivos_view(request: Request, db: Session = Depends(get_db)):
+    archivos_count = db.query(func.count(ArchivoIngesta.id)).scalar() or 0
+    cronogramas_count = db.query(func.count(Cronograma.id)).scalar() or 0
+    productos_count = db.query(func.count(MaestroProducto.id)).scalar() or 0
+    anunciantes_count = db.query(func.count(BaseAnunciante.id_anunciante)).scalar() or 0
+    ultima_fecha_cargada = db.query(func.max(Cronograma.fecha)).scalar()
+    archivos = (
+        db.query(ArchivoIngesta)
+        .order_by(ArchivoIngesta.created_at.desc(), ArchivoIngesta.id.desc())
+        .limit(300)
+        .all()
+    )
+
+    return templates.TemplateResponse(
+        request,
+        "archivos.html",
+        {
+            "archivos": archivos,
+            "archivos_count": archivos_count,
+            "cronogramas_count": cronogramas_count,
+            "productos_count": productos_count,
+            "anunciantes_count": anunciantes_count,
+            "ultima_fecha_cargada": ultima_fecha_cargada,
+            "process_status": request.query_params.get("process_status", ""),
+            "process_message": request.query_params.get("process_message", ""),
+        },
+    )
+
+
+def _parse_export_date(value: str | None) -> date | None:
+    if not value:
+        return None
+
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _get_export_cronogramas_query(
+    db: Session,
+    *,
+    fecha_desde: date | None,
+    fecha_hasta: date | None,
+):
+    query = db.query(Cronograma)
+    if fecha_desde is not None:
+        query = query.filter(Cronograma.fecha >= fecha_desde)
+    if fecha_hasta is not None:
+        query = query.filter(Cronograma.fecha <= fecha_hasta)
+
+    return query.order_by(Cronograma.fecha.asc(), Cronograma.hora_inicio.asc(), Cronograma.id.asc())
+
+
+def _get_export_cronogramas_rows(
+    db: Session,
+    *,
+    fecha_desde: date | None,
+    fecha_hasta: date | None,
+) -> list[dict[str, object]]:
+    return [
+        _format_export_cronograma_row(row)
+        for row in _get_export_cronogramas_query(
+            db,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+        ).all()
+    ]
+
+
+def _get_export_cronogramas_completa_rows(
+    db: Session,
+    *,
+    fecha_desde: date | None,
+    fecha_hasta: date | None,
+) -> list[dict[str, object]]:
+    query = (
+        db.query(
+            Cronograma,
+            MaestroProducto.producto.label("producto_base"),
+            BaseAnunciante.alcance.label("alcance_base"),
+            BaseAnunciante.categoria.label("categoria"),
+        )
+        .select_from(Cronograma)
+    )
+    query = _join_resolved_maestro(query, db)
+    query = (
+        query
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+    )
+    if fecha_desde is not None:
+        query = query.filter(Cronograma.fecha >= fecha_desde)
+    if fecha_hasta is not None:
+        query = query.filter(Cronograma.fecha <= fecha_hasta)
+
+    rows = query.order_by(
+        Cronograma.fecha.asc(),
+        Cronograma.hora_inicio.asc(),
+        Cronograma.id.asc(),
+    ).all()
+    formatted_rows = []
+    for cronograma, producto_base, alcance_base, categoria in rows:
+        formatted_rows.append(
+            _format_export_cronograma_completa_row(
+                cronograma=cronograma,
+                producto_base=producto_base,
+                alcance_base=alcance_base,
+                categoria=categoria,
+            )
+        )
+    return formatted_rows
+
+
+def _format_export_cronograma_row(row: Cronograma) -> dict[str, object]:
+    return {
+        "hora_inicio": _export_value(row.hora_inicio),
+        "hora_fin": _export_value(row.hora_fin),
+        "cod_prod": _export_value(row.cod_prod),
+        "producto": _export_value(row.producto),
+        "tema": _export_value(row.tema),
+        "duracion": _export_value(row.duracion),
+        "t_compra": _export_value(row.t_compra),
+        "t_material": _export_value(row.t_material),
+        "columna_extra": _export_value(row.columna_extra),
+        "alcance": _export_value(row.alcance),
+        "prom_canal": _export_value(row.prom_canal),
+        "programa": _export_value(row.programa),
+        "canal": _export_value(row.canal),
+        "fecha": _format_export_date(row.fecha),
+        "dia_semana": _export_value(row.dia_semana),
+        "dia_de_semana": _format_export_weekday(row.fecha, row.dia_semana),
+        "tipo_dia": _normalize_export_tipo_dia(row.tipo_dia),
+    }
+
+
+def _format_export_cronograma_completa_row(
+    *,
+    cronograma: Cronograma,
+    producto_base: str | None,
+    alcance_base: str | None,
+    categoria: str | None,
+) -> dict[str, object]:
+    row = _format_export_cronograma_row(cronograma)
+    row.update(
+        {
+            "producto_base": _export_value(producto_base),
+            "alcance_base": _export_value(alcance_base),
+            "categoria": _export_value(categoria),
+        }
+    )
+    return row
+
+
+def _export_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+
+    return value
+
+
+def _format_export_date(value: date | None) -> str:
+    if value is None:
+        return ""
+
+    return f"{value.day}/{value.month}/{value.year}"
+
+
+def _format_export_weekday(value: date | None, dia_semana: int | None) -> str:
+    if dia_semana is not None:
+        return WEEKDAY_LABELS.get(dia_semana, "")
+    if value is None:
+        return ""
+
+    return WEEKDAY_LABELS.get(value.isoweekday(), "")
+
+
+def _normalize_export_tipo_dia(value: str | None) -> str:
+    if not value:
+        return ""
+
+    return value.replace("HÃ¡bil", "Hábil")
+
+
+def _build_export_file_stem(
+    *,
+    fecha_desde: date | None,
+    fecha_hasta: date | None,
+    tipo: str = "simple",
+) -> str:
+    prefix = "cronogramas_completo" if tipo == "completa" else "cronogramas"
+    if fecha_desde and fecha_hasta:
+        return f"{prefix}_{fecha_desde.isoformat()}_{fecha_hasta.isoformat()}"
+    if fecha_desde:
+        return f"{prefix}_desde_{fecha_desde.isoformat()}"
+    if fecha_hasta:
+        return f"{prefix}_hasta_{fecha_hasta.isoformat()}"
+
+    return prefix
+
+
+def _build_csv_response_content(
+    rows: list[dict[str, object]],
+    *,
+    columns: list[tuple[str, str]],
+) -> bytes:
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow([header for header, _ in columns])
+    for row in rows:
+        writer.writerow([row[key] for _, key in columns])
+
+    return ("\ufeff" + output.getvalue()).encode("utf-8")
+
+
+def _build_xlsx_response_content(
+    rows: list[dict[str, object]],
+    *,
+    columns: list[tuple[str, str]],
+) -> bytes:
+    workbook = BytesIO()
+    sheet_rows = [
+        [header for header, _ in columns],
+        *[[row[key] for _, key in columns] for row in rows],
+    ]
+
+    with zipfile.ZipFile(workbook, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _xlsx_content_types_xml())
+        archive.writestr("_rels/.rels", _xlsx_root_rels_xml())
+        archive.writestr("xl/workbook.xml", _xlsx_workbook_xml())
+        archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels_xml())
+        archive.writestr("xl/styles.xml", _xlsx_styles_xml())
+        archive.writestr("xl/worksheets/sheet1.xml", _xlsx_sheet_xml(sheet_rows))
+
+    return workbook.getvalue()
+
+
+def _xlsx_content_types_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>"""
+
+
+def _xlsx_root_rels_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+
+
+def _xlsx_workbook_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Cronogramas" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"""
+
+
+def _xlsx_workbook_rels_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+
+def _xlsx_styles_xml() -> str:
+    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+</styleSheet>"""
+
+
+def _xlsx_sheet_xml(rows: list[list[object]]) -> str:
+    row_xml = []
+    for row_index, row_values in enumerate(rows, start=1):
+        cells = []
+        for column_index, value in enumerate(row_values, start=1):
+            cell_reference = f"{_xlsx_column_name(column_index)}{row_index}"
+            text = escape(str(_export_value(value)))
+            cells.append(
+                f'<c r="{cell_reference}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+            )
+        row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        f'<sheetData>{"".join(row_xml)}</sheetData>'
+        '</worksheet>'
+    )
+
+
+def _xlsx_column_name(index: int) -> str:
+    name = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def _envio_anunciante_expr():
+    return func.coalesce(
+        BaseAnunciante.anunciante,
+        Cronograma.producto,
+        literal("Sin anunciante"),
+    )
+
+
+def _envio_alcance_expr():
+    return _clean_sql_text(BaseAnunciante.alcance)
+
+
+def _envio_categoria_expr():
+    return _clean_sql_text(BaseAnunciante.categoria)
+
+
+def _envio_tipo_dia_expr():
+    return _clean_sql_text(
+        func.replace(Cronograma.tipo_dia, "HÃ¡bil", "Hábil")
+    )
+
+
+def _clean_sql_text(column):
+    return func.trim(func.replace(func.replace(column, "\r", ""), "\n", ""))
+
+
+def _envio_base_query(db: Session, *entities):
+    query = (
+        db.query(*entities)
+        .select_from(Cronograma)
+    )
+    query = _join_resolved_maestro(query, db)
+    return (
+        query
+        .outerjoin(
+            BaseAnunciante,
+            MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante,
+        )
+    )
+
+
+def _apply_envio_filters(
+    query,
+    *,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+):
+    if fecha_desde:
+        query = query.filter(Cronograma.fecha >= fecha_desde)
+    if fecha_hasta:
+        query = query.filter(Cronograma.fecha <= fecha_hasta)
+    if alcances:
+        query = query.filter(_envio_alcance_expr().in_(alcances))
+    if categorias:
+        query = query.filter(_envio_categoria_expr().in_(categorias))
+    if anunciantes:
+        query = query.filter(_envio_anunciante_expr().in_(anunciantes))
+    if tipos_dia:
+        query = query.filter(_envio_tipo_dia_expr().in_(tipos_dia))
+    if prom_canal:
+        query = query.filter(Cronograma.prom_canal == prom_canal)
+
+    return query
+
+
+def _get_envio_total_duration(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+) -> int:
+    query = _envio_base_query(
+        db,
+        func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total"),
+    )
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    return int(query.scalar() or 0)
+
+
+def _apply_envio_raw_control_filters(
+    query,
+    *,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    tipos_dia: list[str],
+    prom_canal: str | None,
+):
+    if fecha_desde:
+        query = query.filter(Cronograma.fecha >= fecha_desde)
+    if fecha_hasta:
+        query = query.filter(Cronograma.fecha <= fecha_hasta)
+    if tipos_dia:
+        query = query.filter(_envio_tipo_dia_expr().in_(tipos_dia))
+    if prom_canal:
+        query = query.filter(Cronograma.prom_canal == prom_canal)
+    return query
+
+
+def _get_envio_total_validation(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    tipos_dia: list[str],
+    prom_canal: str | None,
+) -> dict[str, object]:
+    raw_query = db.query(
+        func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    )
+    raw_query = _apply_envio_raw_control_filters(
+        raw_query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    raw_total = int(raw_query.scalar() or 0)
+
+    joined_query = _envio_base_query(
+        db,
+        func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total"),
+    )
+    joined_query = _apply_envio_raw_control_filters(
+        joined_query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    joined_total = int(joined_query.scalar() or 0)
+    difference = joined_total - raw_total
+
+    return {
+        "raw_total": raw_total,
+        "joined_total": joined_total,
+        "difference": difference,
+        "ok": difference == 0,
+    }
+
+
+def _get_envio_main_rows(
+    *,
+    db: Session,
+    total_duracion: int,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+    ranking_alcance: str | None,
+    ranking_categoria: str | None,
+) -> list[dict[str, object]]:
+    alcance_expr = _envio_alcance_expr().label("alcance")
+    anunciante_expr = _envio_anunciante_expr().label("anunciante")
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    query = _envio_base_query(
+        db,
+        alcance_expr,
+        anunciante_expr,
+        Cronograma.canal,
+        duracion_expr,
+    )
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    if ranking_alcance:
+        query = query.filter(_envio_alcance_expr() == ranking_alcance)
+    if ranking_categoria:
+        query = query.filter(_envio_categoria_expr() == ranking_categoria)
+    rows = (
+        query.group_by(alcance_expr, anunciante_expr, Cronograma.canal)
+        .order_by(duracion_expr.desc())
+        .limit(50)
+        .all()
+    )
+
+    return [
+        {
+            "alcance": row.alcance or "Sin alcance",
+            "anunciante": row.anunciante or "Sin anunciante",
+            "canal": row.canal or "Sin canal",
+            "duracion_total": int(row.duracion_total or 0),
+            "porcentaje": _percentage(row.duracion_total, total_duracion),
+        }
+        for row in rows
+    ]
+
+
+def _envio_ranking_key(alcance: object, anunciante: object, canal: object) -> tuple[str, str, str]:
+    return (
+        str(alcance or "Sin alcance"),
+        str(anunciante or "Sin anunciante"),
+        str(canal or "Sin canal"),
+    )
+
+
+def _get_envio_ranking_product_rows(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+    ranking_alcance: str | None,
+    ranking_categoria: str | None,
+    main_rows: list[dict[str, object]],
+) -> dict[tuple[str, str, str], list[dict[str, object]]]:
+    main_keys = {
+        _envio_ranking_key(row["alcance"], row["anunciante"], row["canal"])
+        for row in main_rows
+    }
+    if not main_keys:
+        return {}
+
+    alcance_expr = _envio_alcance_expr().label("alcance")
+    anunciante_expr = _envio_anunciante_expr().label("anunciante")
+    producto_expr = func.coalesce(Cronograma.producto, literal("Sin producto")).label("producto")
+    tema_expr = func.coalesce(Cronograma.tema, literal("Sin tema")).label("tema")
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+
+    query = _envio_base_query(
+        db,
+        alcance_expr,
+        anunciante_expr,
+        Cronograma.canal,
+        producto_expr,
+        tema_expr,
+        duracion_expr,
+    )
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    if ranking_alcance:
+        query = query.filter(_envio_alcance_expr() == ranking_alcance)
+    if ranking_categoria:
+        query = query.filter(_envio_categoria_expr() == ranking_categoria)
+
+    rows = (
+        query.group_by(
+            alcance_expr,
+            anunciante_expr,
+            Cronograma.canal,
+            producto_expr,
+            tema_expr,
+        )
+        .order_by(duracion_expr.desc())
+        .all()
+    )
+
+    grouped: dict[tuple[str, str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        key = _envio_ranking_key(row.alcance, row.anunciante, row.canal)
+        if key not in main_keys:
+            continue
+        grouped[key].append(
+            {
+                "producto": row.producto or "Sin producto",
+                "tema": row.tema or "Sin tema",
+                "duracion_total": int(row.duracion_total or 0),
+            }
+        )
+
+    return grouped
+
+
+def _get_envio_side_rows(
+    *,
+    db: Session,
+    total_duracion: int,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    alcance_expr = _envio_alcance_expr().label("alcance")
+    query = _envio_base_query(db, alcance_expr, duracion_expr)
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=None,
+    )
+    rows = (
+        query.filter(BaseAnunciante.alcance.isnot(None))
+        .group_by(alcance_expr)
+        .order_by(duracion_expr.desc())
+        .all()
+    )
+    alcance_total_duracion = sum(int(row.duracion_total or 0) for row in rows)
+    percentage_total = alcance_total_duracion or total_duracion
+
+    return [
+        {
+            "label": row.alcance or "Sin alcance",
+            "duracion_total": int(row.duracion_total or 0),
+            "porcentaje": _percentage(row.duracion_total, percentage_total),
+        }
+        for row in rows
+    ]
+
+
+def _get_envio_category_side_rows(
+    *,
+    db: Session,
+    total_duracion: int,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    categoria_expr = _envio_categoria_expr().label("categoria")
+    query = _envio_base_query(db, categoria_expr, duracion_expr)
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=None,
+    )
+    rows = (
+        query.filter(BaseAnunciante.categoria.isnot(None))
+        .group_by(categoria_expr)
+        .order_by(duracion_expr.desc())
+        .all()
+    )
+    categoria_total_duracion = sum(int(row.duracion_total or 0) for row in rows)
+    percentage_total = categoria_total_duracion or total_duracion
+
+    return [
+        {
+            "label": row.categoria or "Sin categoría",
+            "duracion_total": int(row.duracion_total or 0),
+            "porcentaje": _percentage(row.duracion_total, percentage_total),
+        }
+        for row in rows
+    ]
+
+
+def _get_envio_channel_rows(
+    *,
+    db: Session,
+    total_duracion: int,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    query = _envio_base_query(db, Cronograma.canal, duracion_expr)
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    rows = (
+        query.group_by(Cronograma.canal)
+        .order_by(duracion_expr.desc())
+        .all()
+    )
+
+    return [
+        {
+            "canal": row.canal or "Sin canal",
+            "duracion_total": int(row.duracion_total or 0),
+            "porcentaje": _percentage(row.duracion_total, total_duracion),
+            "color": _channel_color(row.canal),
+        }
+        for row in rows
+    ]
+
+
+def _get_envio_date_channel_rows(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    query = _envio_base_query(db, Cronograma.fecha, Cronograma.canal, duracion_expr)
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    rows = (
+        query.filter(Cronograma.fecha.isnot(None))
+        .group_by(Cronograma.fecha, Cronograma.canal)
+        .order_by(Cronograma.fecha.asc(), Cronograma.canal.asc())
+        .all()
+    )
+
+    return [
+        {
+            "fecha": row.fecha,
+            "canal": row.canal or "Sin canal",
+            "duracion_total": int(row.duracion_total or 0),
+        }
+        for row in rows
+    ]
+
+
+def _get_envio_hour_channel_rows(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    query = _envio_base_query(db, Cronograma.hora_inicio, Cronograma.canal, duracion_expr)
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    rows = (
+        query.filter(Cronograma.hora_inicio.isnot(None))
+        .group_by(Cronograma.hora_inicio, Cronograma.canal)
+        .all()
+    )
+
+    grouped: defaultdict[tuple[str, str], int] = defaultdict(int)
+    for row in rows:
+        hour = _normalize_hour(row.hora_inicio)
+        if hour is None:
+            continue
+
+        grouped[(hour, row.canal or "Sin canal")] += int(row.duracion_total or 0)
+
+    return [
+        {"hora": hour, "canal": canal, "duracion_total": duracion_total}
+        for (hour, canal), duracion_total in sorted(grouped.items())
+    ]
+
+
+def _get_envio_weekday_channel_rows(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    tipos_dia: list[str],
+    prom_canal: str | None,
+) -> list[dict[str, object]]:
+    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    query = _envio_base_query(db, Cronograma.dia_semana, Cronograma.canal, duracion_expr)
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=tipos_dia,
+        prom_canal=prom_canal,
+    )
+    rows = (
+        query.filter(Cronograma.dia_semana.isnot(None))
+        .group_by(Cronograma.dia_semana, Cronograma.canal)
+        .order_by(Cronograma.dia_semana.asc(), Cronograma.canal.asc())
+        .all()
+    )
+
+    return [
+        {
+            "dia": WEEKDAY_LABELS.get(row.dia_semana, str(row.dia_semana)),
+            "canal": row.canal or "Sin canal",
+            "duracion_total": int(row.duracion_total or 0),
+        }
+        for row in rows
+    ]
+
+
+def _get_envio_filter_options(db: Session) -> dict[str, object]:
+    alcance_expr = _clean_sql_text(BaseAnunciante.alcance)
+    categoria_expr = _clean_sql_text(BaseAnunciante.categoria)
+    anunciante_expr = _envio_anunciante_expr()
+    tipo_dia_expr = _envio_tipo_dia_expr()
+
+    return {
+        "alcances": _clean_multi_values(
+            [
+                row[0]
+                for row in db.query(alcance_expr)
+                .filter(BaseAnunciante.alcance.isnot(None))
+                .distinct()
+                .order_by(alcance_expr.asc())
+                .all()
+            ]
+        ),
+        "categorias": _clean_multi_values(
+            [
+                row[0]
+                for row in db.query(categoria_expr)
+                .filter(BaseAnunciante.categoria.isnot(None))
+                .distinct()
+                .order_by(categoria_expr.asc())
+                .all()
+            ]
+        ),
+        "anunciantes": _clean_multi_values(
+            [
+                row[0]
+                for row in _envio_base_query(db, anunciante_expr)
+                .filter(anunciante_expr.isnot(None))
+                .distinct()
+                .order_by(anunciante_expr.asc())
+                .all()
+            ]
+        ),
+        "tipos_dia": _clean_multi_values(
+            [
+                row[0]
+                for row in db.query(tipo_dia_expr)
+                .filter(Cronograma.tipo_dia.isnot(None))
+                .distinct()
+                .order_by(tipo_dia_expr.asc())
+                .all()
+            ]
+        ),
+        "prom_canales": [
+            row[0]
+            for row in db.query(Cronograma.prom_canal)
+            .filter(Cronograma.prom_canal.isnot(None))
+            .distinct()
+            .order_by(Cronograma.prom_canal.asc())
+            .all()
+        ],
+    }
+
+
+def _clean_multi_values(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+
+    cleaned: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+
+    return cleaned
+
+
+def _normalize_all_selected(selected: list[str], options: list[str]) -> list[str]:
+    if not selected:
+        return []
+
+    option_values = {str(option).strip() for option in options if str(option).strip()}
+    selected_values = {str(value).strip() for value in selected if str(value).strip()}
+    return [] if option_values and selected_values >= option_values else selected
+
+
+def _percentage(value: object, total: int) -> float:
+    return (int(value or 0) / total * 100) if total else 0.0
+
+
+def _channel_color(channel: str | None) -> str:
+    if not channel:
+        return CHANNEL_COLORS["Sin canal"]
+
+    if channel in CHANNEL_COLORS:
+        return CHANNEL_COLORS[channel]
+
+    color_index = sum(ord(character) for character in channel) % len(PIE_COLORS)
+    return PIE_COLORS[color_index]
+
+
+def _normalize_hour(value: object) -> str | None:
+    if value in {None, ""}:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    else:
+        digits_only = "".join(character for character in text if character.isdigit())
+        if len(digits_only) == 5:
+            digits_only = f"0{digits_only}"
+        text = digits_only[:2]
+
+    digits = "".join(character for character in text if character.isdigit())
+    if not digits:
+        return None
+
+    hour = int(digits)
+    if hour < 0 or hour > 23:
+        return None
+
+    return f"{hour:02d}"
+
+
+def _parse_optional_int(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+
+    text = str(value).strip()
+    return int(text) if text.isdigit() else None
+
+
+def _parse_int_list(value: object) -> list[int]:
+    if value in {None, ""}:
+        return []
+
+    parsed = []
+    for item in str(value).split(","):
+        text = item.strip()
+        if text.isdigit():
+            parsed.append(int(text))
+
+    return parsed
+
+
+def _build_line_chart(rows: list[dict[str, object]]) -> dict[str, object]:
+    if not rows:
+        return {"series": [], "x_labels": [], "y_labels": [], "width": 760, "height": 280}
+
+    width = 760
+    height = 280
+    padding_left = 58
+    padding_right = 24
+    padding_top = 26
+    padding_bottom = 48
+    plot_width = width - padding_left - padding_right
+    plot_height = height - padding_top - padding_bottom
+
+    dates = sorted({row["fecha"] for row in rows if row["fecha"] is not None})
+    channels = sorted({str(row["canal"]) for row in rows})
+    values_by_key = {
+        (row["fecha"], str(row["canal"])): int(row["duracion_total"] or 0)
+        for row in rows
+    }
+    max_value = max(values_by_key.values()) if values_by_key else 0
+    max_value = max(max_value, 1)
+
+    def x_position(index: int) -> float:
+        if len(dates) == 1:
+            return padding_left + plot_width / 2
+        return padding_left + (plot_width * index / (len(dates) - 1))
+
+    def y_position(value: int) -> float:
+        return padding_top + plot_height - (plot_height * value / max_value)
+
+    series = []
+    for channel in channels:
+        points = []
+        for index, current_date in enumerate(dates):
+            value = values_by_key.get((current_date, channel), 0)
+            points.append(
+                {
+                    "x": round(x_position(index), 2),
+                    "y": round(y_position(value), 2),
+                    "value": value,
+                }
+            )
+
+        series.append(
+            {
+                "channel": channel,
+                "color": _channel_color(channel),
+                "points": points,
+                "polyline": " ".join(f"{point['x']},{point['y']}" for point in points),
+            }
+        )
+
+    y_labels = []
+    for step in range(0, 5):
+        value = round(max_value * step / 4)
+        y_labels.append({"value": value, "y": round(y_position(value), 2)})
+
+    return {
+        "series": series,
+        "x_labels": [
+            {
+                "label": current_date.strftime("%d/%m"),
+                "x": round(x_position(index), 2),
+            }
+            for index, current_date in enumerate(dates)
+        ],
+        "y_labels": y_labels,
+        "width": width,
+        "height": height,
+        "plot": {
+            "x": padding_left,
+            "y": padding_top,
+            "width": plot_width,
+            "height": plot_height,
+        },
+    }
+
+
+def _build_grouped_bar_chart(
+    rows: list[dict[str, object]],
+    *,
+    label_key: str,
+    label_order: list[str] | None,
+) -> dict[str, object]:
+    if not rows and label_order is None:
+        return {"groups": [], "channels": [], "max_value": 0}
+
+    channel_names = sorted({str(row["canal"]) for row in rows})
+    if label_order is None:
+        labels = sorted({str(row[label_key]) for row in rows})
+    else:
+        labels = label_order
+
+    values_by_key = {
+        (str(row[label_key]), str(row["canal"])): int(row["duracion_total"] or 0)
+        for row in rows
+    }
+    max_value = max(values_by_key.values()) if values_by_key else 0
+    max_value = max(max_value, 1)
+
+    groups = []
+    for label in labels:
+        bars = []
+        for channel in channel_names:
+            value = values_by_key.get((label, channel), 0)
+            bars.append(
+                {
+                    "channel": channel,
+                    "value": value,
+                    "height": round(value / max_value * 100, 2),
+                    "color": _channel_color(channel),
+                }
+            )
+        groups.append({"label": label, "bars": bars})
+
+    return {
+        "groups": groups,
+        "channels": [
+            {"name": channel, "color": _channel_color(channel)}
+            for channel in channel_names
+        ],
+        "max_value": max_value,
+    }
+
+
+def _build_pie_chart_segments(share_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not share_rows:
+        return []
+
+    center_x = 110
+    center_y = 110
+    radius = 86
+    start_angle = -90.0
+    segments: list[dict[str, object]] = []
+
+    for row in share_rows:
+        percentage = float(row["porcentaje"])
+        sweep_angle = 360 * (percentage / 100)
+        end_angle = start_angle + sweep_angle
+
+        segments.append(
+            {
+                "path": _describe_arc(
+                    center_x=center_x,
+                    center_y=center_y,
+                    radius=radius,
+                    start_angle=start_angle,
+                    end_angle=end_angle,
+                ),
+                "color": row["color"],
+                "canal": row["canal"],
+                "porcentaje": percentage,
+            }
+        )
+        start_angle = end_angle
+
+    return segments
+
+
+def _describe_arc(
+    *,
+    center_x: float,
+    center_y: float,
+    radius: float,
+    start_angle: float,
+    end_angle: float,
+) -> str:
+    start_x, start_y = _polar_to_cartesian(center_x, center_y, radius, end_angle)
+    end_x, end_y = _polar_to_cartesian(center_x, center_y, radius, start_angle)
+    large_arc_flag = 1 if end_angle - start_angle > 180 else 0
+
+    return (
+        f"M {center_x} {center_y} "
+        f"L {start_x} {start_y} "
+        f"A {radius} {radius} 0 {large_arc_flag} 0 {end_x} {end_y} Z"
+    )
+
+
+def _polar_to_cartesian(
+    center_x: float, center_y: float, radius: float, angle_degrees: float
+) -> tuple[float, float]:
+    angle_radians = math.radians(angle_degrees)
+    return (
+        center_x + radius * math.cos(angle_radians),
+        center_y + radius * math.sin(angle_radians),
+    )

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}Exportaciones | Monitor Pautas{% endblock %}
+
+{% block content %}
+<section class="page-header">
+  <div>
+    <p class="eyebrow">Salida de datos</p>
+    <h1 class="page-title titulos">Exportaciones</h1>
+    <p class="page-subtitle">Generación de archivos de cronogramas por período.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Cronogramas</p>
+      <h2 class="panel-title">Período de exportación</h2>
+    </div>
+    <span class="panel-meta">{{ export_count }} filas</span>
+  </div>
+
+  <form method="get" action="/exportaciones" class="filter-grid">
+    <label class="field">
+      <span class="field-label">Fecha desde</span>
+      <input class="input" type="date" name="fecha_desde" value="{{ fecha_desde }}">
+    </label>
+    <label class="field">
+      <span class="field-label">Fecha hasta</span>
+      <input class="input" type="date" name="fecha_hasta" value="{{ fecha_hasta }}">
+    </label>
+    <div class="filter-actions">
+      <button class="button button-secondary" type="submit">Actualizar</button>
+      <a class="button button-secondary" href="/exportaciones">Limpiar</a>
+    </div>
+  </form>
+</section>
+
+<section class="stats-grid">
+  <article class="stat-card">
+    <span class="stat-label">Primera fecha cargada</span>
+    <strong class="stat-value stat-value--small">
+      {{ min_fecha.strftime("%d/%m/%Y") if min_fecha else "Sin datos" }}
+    </strong>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Última fecha cargada</span>
+    <strong class="stat-value stat-value--small">
+      {{ max_fecha.strftime("%d/%m/%Y") if max_fecha else "Sin datos" }}
+    </strong>
+  </article>
+  <article class="stat-card">
+    <span class="stat-label">Filas del período</span>
+    <strong class="stat-value">{{ export_count }}</strong>
+  </article>
+</section>
+
+<section class="panel panel--tight">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Descarga</p>
+      <h2 class="panel-title">Cronogramas</h2>
+    </div>
+    <div class="panel-actions">
+      <a class="button" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=csv">CSV</a>
+      <a class="button button-secondary" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=xlsx">XLSX</a>
+    </div>
+  </div>
+</section>
+
+<section class="panel panel--tight">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Looker</p>
+      <h2 class="panel-title">Cronogramas completos</h2>
+    </div>
+    <div class="panel-actions">
+      <a class="button" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=csv&tipo=completa">CSV</a>
+      <a class="button button-secondary" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=xlsx&tipo=completa">XLSX</a>
+    </div>
+  </div>
+</section>
+{% endblock %}

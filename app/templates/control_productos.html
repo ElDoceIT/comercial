@@ -1,0 +1,415 @@
+{% extends "base.html" %}
+
+{% block title %}Anunciantes | Monitor Pautas{% endblock %}
+
+{% block content %}
+<section class="page-header page-header--split">
+  <div>
+    <p class="eyebrow">Control</p>
+    <h1 class="page-title titulos">Anunciantes</h1>
+    <p class="page-subtitle">Asignación manual de productos nuevos a anunciantes y control de productos ya reconocidos.</p>
+  </div>
+</section>
+
+{% if message %}
+<section class="panel panel--tight process-message process-message--{{ status or 'ok' }}">
+  <strong>{{ message }}</strong>
+</section>
+{% endif %}
+
+<section class="panel panel--tight">
+  <form method="get" action="/control-productos" class="filter-grid">
+    <label class="field">
+      <span class="field-label">Fecha desde</span>
+      <input class="input" type="date" name="fecha_desde" value="{{ filters.fecha_desde }}" min="{{ min_fecha.isoformat() if min_fecha else '' }}" max="{{ max_fecha.isoformat() if max_fecha else '' }}">
+    </label>
+
+    <label class="field">
+      <span class="field-label">Fecha hasta</span>
+      <input class="input" type="date" name="fecha_hasta" value="{{ filters.fecha_hasta }}" min="{{ min_fecha.isoformat() if min_fecha else '' }}" max="{{ max_fecha.isoformat() if max_fecha else '' }}">
+    </label>
+
+    <label class="field field--wide">
+      <span class="field-label">Archivo</span>
+      <select class="input" name="archivo_id">
+        <option value="">Todos</option>
+        {% for archivo in archivos %}
+        <option value="{{ archivo.id }}" {% if filters.archivo_id == archivo.id %}selected{% endif %}>
+          {{ archivo.nombre_archivo }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <div class="filter-actions">
+      <button class="button" type="submit">Filtrar</button>
+      <a class="button button-secondary" href="/control-productos">Limpiar</a>
+    </div>
+  </form>
+</section>
+
+<section class="panel panel--tight">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Anunciantes</p>
+      <h2 class="panel-title">Crear anunciante rápido</h2>
+    </div>
+  </div>
+  <form method="post" action="/control-productos/anunciante" class="control-create-form">
+    <label class="field">
+      <span class="field-label">Anunciante</span>
+      <input class="input" type="text" name="anunciante" required>
+    </label>
+    <label class="field">
+      <span class="field-label">Alcance</span>
+      <input class="input" list="alcances-list" name="alcance">
+    </label>
+    <label class="field">
+      <span class="field-label">Categoría</span>
+      <input class="input" list="categorias-list" name="categoria">
+    </label>
+    <div class="filter-actions">
+      <button class="button" type="submit">Crear anunciante</button>
+    </div>
+  </form>
+</section>
+
+<datalist id="alcances-list">
+  {% for alcance in alcances %}
+  <option value="{{ alcance }}"></option>
+  {% endfor %}
+</datalist>
+<datalist id="categorias-list">
+  {% for categoria in categorias %}
+  <option value="{{ categoria }}"></option>
+  {% endfor %}
+</datalist>
+
+{% if auto_assigned_rows %}
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Revisión</p>
+      <h2 class="panel-title">Asignados automáticamente en la última corrida</h2>
+    </div>
+    <span class="panel-meta">{{ auto_assigned_rows|length }} grupos</span>
+  </div>
+
+  <div class="table-wrap">
+    <table class="data-table control-table">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Producto cronograma</th>
+          <th>Producto maestro</th>
+          <th>Anunciante asignado</th>
+          <th>Alcance</th>
+          <th>Categoría</th>
+          <th>Filas</th>
+          <th>Segundos</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in auto_assigned_rows %}
+        <tr>
+          <td>{{ row.cod_prod }}</td>
+          <td>{{ row.producto_cronograma or "-" }}<br><span class="muted-cell">{{ row.tema_cronograma or "" }}</span></td>
+          <td>{{ row.producto_base or "-" }}<br><span class="muted-cell">{{ row.tema_base or "" }}</span></td>
+          <td>{{ row.anunciante or "-" }}</td>
+          <td>{{ row.alcance or "-" }}</td>
+          <td>{{ row.categoria or "-" }}</td>
+          <td>{{ row.filas }}</td>
+          <td>{{ row.segundos }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <form method="post" action="/control-productos/asignar-promos-canal">
+    <div class="panel-header">
+      <div>
+        <p class="eyebrow">Sugerencias</p>
+        <h2 class="panel-title">Coincidencias automáticas listas para asignar</h2>
+      </div>
+      <div class="panel-actions">
+        <button class="button button-secondary" type="submit" {% if not auto_suggestion_rows %}disabled{% endif %}>Asignar coincidencias</button>
+        <span class="panel-meta">{{ auto_suggestion_rows|length }} grupos</span>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table control-table">
+        <thead>
+          <tr>
+            <th>Código</th>
+            <th>Producto detectado</th>
+            <th>Canal</th>
+            <th>Anunciante a asignar</th>
+            <th>Motivo</th>
+            <th>Alcance</th>
+            <th>Categoría</th>
+            <th>Segundos</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in auto_suggestion_rows %}
+          <tr>
+            <td>
+              {{ row.cod_prod }}
+              <input type="hidden" name="cod_prod" value="{{ row.cod_prod }}">
+              <input type="hidden" name="producto_{{ row.cod_prod }}" value="{{ row.producto or '' }}">
+              <input type="hidden" name="tema_{{ row.cod_prod }}" value="{{ row.tema or '' }}">
+            </td>
+            <td>{{ row.producto or "-" }}<br><span class="muted-cell">{{ row.tema or "" }}</span></td>
+            <td>{{ row.canal or "-" }}</td>
+            <td>
+              <div class="advertiser-combobox" data-placeholder="No asignar">
+                <input class="advertiser-combobox-value" type="hidden" name="id_anunciante_{{ row.cod_prod }}" value="{{ row.id_anunciante or '' }}">
+                <button class="input input--compact advertiser-combobox-button" type="button" aria-expanded="false">
+                  {{ row.anunciante or "No asignar" }}
+                </button>
+                <div class="advertiser-combobox-menu" hidden>
+                  <input class="input input--compact advertiser-combobox-search" type="search" placeholder="Buscar anunciante">
+                  <div class="advertiser-combobox-options">
+                    <button class="advertiser-combobox-option" type="button" data-value="" data-label="No asignar">No asignar</button>
+                    {% for anunciante in anunciantes %}
+                    <button class="advertiser-combobox-option" type="button" data-value="{{ anunciante.id_anunciante }}" data-label="{{ anunciante.anunciante or ("#" ~ anunciante.id_anunciante) }}">{{ anunciante.anunciante or ("#" ~ anunciante.id_anunciante) }}</button>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+            </td>
+            <td>{{ row.rule }}{% if row.detail %}<br><span class="muted-cell">{{ row.detail }}</span>{% endif %}</td>
+            <td>{{ row.alcance or "-" }}</td>
+            <td>{{ row.categoria or "-" }}</td>
+            <td>{{ row.segundos }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="8" class="empty-state">No hay coincidencias automáticas confiables para asignar.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Pendientes</p>
+      <h2 class="panel-title">Productos de cronograma sin match</h2>
+    </div>
+    <span class="panel-meta">{{ unmatched_rows|length }} grupos</span>
+  </div>
+
+  <div class="table-wrap">
+    <table class="data-table control-table">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Producto detectado</th>
+          <th>Tema</th>
+          <th>Última fecha</th>
+          <th>Filas</th>
+          <th>Segundos</th>
+          <th>Asignar anunciante</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in unmatched_rows %}
+        <tr>
+          <td>{{ row.cod_prod }}</td>
+          <td>{{ row.producto or "-" }}</td>
+          <td>{{ row.tema or "-" }}</td>
+          <td>{{ row.ultima_fecha.strftime("%d/%m/%Y") if row.ultima_fecha else "-" }}</td>
+          <td>{{ row.filas }}</td>
+          <td>{{ row.segundos }}</td>
+          <td>
+            <form method="post" action="/control-productos/asignar" class="inline-assign-form">
+              <input type="hidden" name="cod_prod" value="{{ row.cod_prod }}">
+              <input type="hidden" name="producto" value="{{ row.producto or '' }}">
+              <input type="hidden" name="tema" value="{{ row.tema or '' }}">
+              <div class="advertiser-combobox" data-placeholder="Elegir anunciante" data-required="true">
+                <input class="advertiser-combobox-value" type="hidden" name="id_anunciante">
+                <button class="input input--compact advertiser-combobox-button" type="button" aria-expanded="false">
+                  Elegir anunciante
+                </button>
+                <div class="advertiser-combobox-menu" hidden>
+                  <input class="input input--compact advertiser-combobox-search" type="search" placeholder="Buscar anunciante">
+                  <div class="advertiser-combobox-options">
+                    {% for anunciante in anunciantes %}
+                    <button class="advertiser-combobox-option" type="button" data-value="{{ anunciante.id_anunciante }}" data-label="{{ anunciante.anunciante or ("#" ~ anunciante.id_anunciante) }}">{{ anunciante.anunciante or ("#" ~ anunciante.id_anunciante) }}</button>
+                    {% endfor %}
+                  </div>
+                </div>
+              </div>
+              <button class="button button-small" type="submit">Asignar</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="7" class="empty-state">No hay productos pendientes de match.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Control temporal</p>
+      <h2 class="panel-title">Productos ya cargados que matchearon</h2>
+    </div>
+    <div class="panel-actions">
+      <button class="button button-secondary button-small" type="button" data-toggle-panel="matched-products-panel" aria-expanded="false">Ver detalle</button>
+      <span class="panel-meta">{{ matched_rows|length }} grupos</span>
+    </div>
+  </div>
+
+  <div class="table-wrap" id="matched-products-panel" hidden>
+    <table class="data-table control-table">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Producto cronograma</th>
+          <th>Producto maestro</th>
+          <th>Anunciante</th>
+          <th>Alcance</th>
+          <th>Categoría</th>
+          <th>Última fecha</th>
+          <th>Filas</th>
+          <th>Segundos</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in matched_rows %}
+        <tr>
+          <td>{{ row.cod_prod }}</td>
+          <td>{{ row.producto_cronograma or "-" }}<br><span class="muted-cell">{{ row.tema_cronograma or "" }}</span></td>
+          <td>{{ row.producto_base or "-" }}<br><span class="muted-cell">{{ row.tema_base or "" }}</span></td>
+          <td>{{ row.anunciante or "-" }}</td>
+          <td>{{ row.alcance or "-" }}</td>
+          <td>{{ row.categoria or "-" }}</td>
+          <td>{{ row.ultima_fecha.strftime("%d/%m/%Y") if row.ultima_fecha else "-" }}</td>
+          <td>{{ row.filas }}</td>
+          <td>{{ row.segundos }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="9" class="empty-state">Todavía no hay productos matcheados para mostrar.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+<script>
+  (() => {
+    const normalize = (value) =>
+      value
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+    const closeAll = (except = null) => {
+      document.querySelectorAll(".advertiser-combobox").forEach((combobox) => {
+        if (combobox === except) return;
+        combobox.querySelector(".advertiser-combobox-menu")?.setAttribute("hidden", "");
+        combobox.querySelector(".advertiser-combobox-button")?.setAttribute("aria-expanded", "false");
+      });
+    };
+
+    document.querySelectorAll(".advertiser-combobox").forEach((combobox) => {
+      const button = combobox.querySelector(".advertiser-combobox-button");
+      const menu = combobox.querySelector(".advertiser-combobox-menu");
+      const search = combobox.querySelector(".advertiser-combobox-search");
+      const value = combobox.querySelector(".advertiser-combobox-value");
+      const options = Array.from(combobox.querySelectorAll(".advertiser-combobox-option"));
+      if (!button || !menu || !search || !value) return;
+
+      const syncSelectedOption = () => {
+        options.forEach((option) => {
+          const isSelected = (option.dataset.value || "") === value.value;
+          option.classList.toggle("is-selected", isSelected);
+          option.setAttribute("aria-selected", String(isSelected));
+        });
+      };
+
+      const open = () => {
+        closeAll(combobox);
+        syncSelectedOption();
+        menu.removeAttribute("hidden");
+        button.setAttribute("aria-expanded", "true");
+        search.value = "";
+        options.forEach((option) => option.hidden = false);
+        search.focus();
+      };
+
+      const close = () => {
+        menu.setAttribute("hidden", "");
+        button.setAttribute("aria-expanded", "false");
+      };
+
+      button.addEventListener("click", () => {
+        if (menu.hidden) {
+          open();
+        } else {
+          close();
+        }
+      });
+
+      search.addEventListener("input", () => {
+        const query = normalize(search.value.trim());
+        options.forEach((option) => {
+          option.hidden = query && !normalize(option.dataset.label || option.textContent || "").includes(query);
+        });
+      });
+
+      options.forEach((option) => {
+        option.addEventListener("click", () => {
+          value.value = option.dataset.value || "";
+          button.textContent = option.dataset.label || combobox.dataset.placeholder || "Elegir";
+          syncSelectedOption();
+          close();
+        });
+      });
+
+      syncSelectedOption();
+
+      combobox.closest("form")?.addEventListener("submit", (event) => {
+        if (combobox.dataset.required === "true" && !value.value) {
+          event.preventDefault();
+          open();
+        }
+      });
+    });
+
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".advertiser-combobox")) {
+        closeAll();
+      }
+    });
+
+    document.querySelectorAll("[data-toggle-panel]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const panel = document.getElementById(button.dataset.togglePanel);
+        if (!panel) return;
+
+        const shouldOpen = panel.hidden;
+        panel.hidden = !shouldOpen;
+        button.setAttribute("aria-expanded", String(shouldOpen));
+        button.textContent = shouldOpen ? "Ocultar detalle" : "Ver detalle";
+      });
+    });
+  })();
+</script>
+{% endblock %}

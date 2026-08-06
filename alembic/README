@@ -1,0 +1,7 @@
+Alembic migrations for the comercial application.
+
+Create a migration with:
+    alembic revision --autogenerate -m "description"
+
+Apply pending migrations with:
+    alembic upgrade head

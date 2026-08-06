@@ -1,0 +1,25 @@
+{% if bar_chart.groups %}
+<div class="grouped-chart-wrap">
+  <div class="grouped-chart">
+    {% for group in bar_chart.groups %}
+    <div class="grouped-chart-group">
+      <div class="grouped-bars">
+        {% for bar in group.bars %}
+        <span class="grouped-bar" title="{{ bar.channel }}: {{ bar.value }} seg">
+          <i style="height: {{ bar.height }}%; background: {{ bar.color }}"></i>
+        </span>
+        {% endfor %}
+      </div>
+      <span class="grouped-label">{{ group.label }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+<div class="chart-legend">
+  {% for channel in bar_chart.channels %}
+  <span><i style="background: {{ channel.color }}"></i>{{ channel.name }}</span>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty-state">No hay datos para graficar.</p>
+{% endif %}
