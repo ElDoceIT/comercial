@@ -40,8 +40,9 @@
   <section class="dashboard-filters panel panel--tight">
     <form method="get" action="/envio-monitor" class="filter-grid">
       <div class="quick-date-row">
-        <a class="quick-date-button" href="/envio-monitor?fecha_desde={{ quick_date_ranges.ultimos_15.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimos_15.fecha_hasta }}">Últimos 15 días</a>
-        <a class="quick-date-button" href="/envio-monitor?fecha_desde={{ quick_date_ranges.ultimo_mes.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimo_mes.fecha_hasta }}">Último mes</a>
+        <a class="quick-date-button{% if filters.fecha_desde == quick_date_ranges.ultimos_15.fecha_desde and filters.fecha_hasta == quick_date_ranges.ultimos_15.fecha_hasta %} is-active{% endif %}" href="/envio-monitor?fecha_desde={{ quick_date_ranges.ultimos_15.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimos_15.fecha_hasta }}">Últimos 15 días</a>
+        <a class="quick-date-button{% if filters.fecha_desde == quick_date_ranges.ultimo_mes.fecha_desde and filters.fecha_hasta == quick_date_ranges.ultimo_mes.fecha_hasta %} is-active{% endif %}" href="/envio-monitor?fecha_desde={{ quick_date_ranges.ultimo_mes.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimo_mes.fecha_hasta }}">Último mes</a>
+        <a class="quick-date-button{% if filters.filtro_comercial %} is-active{% endif %}" href="/envio-monitor?filtro_comercial=true">Filtro Comercial</a>
       </div>
 
       <label class="field">
@@ -152,34 +153,6 @@
       {% endif %}
     </article>
 
-    <article class="panel compact-panel dashboard-channel-seconds">
-      <div class="panel-header">
-        <div>
-          <p class="eyebrow">Share</p>
-          <h2 class="panel-title">Segundos por canal</h2>
-        </div>
-      </div>
-      {% if pie_segments %}
-      <div class="dashboard-pie-wrap">
-        <svg class="dashboard-pie" viewBox="0 0 220 220" role="img" aria-label="Participación de segundos por canal">
-          {% for segment in pie_segments %}
-          <path d="{{ segment.path }}" fill="{{ segment.color }}"></path>
-          {% endfor %}
-          <circle cx="110" cy="110" r="45" fill="#ffffff"></circle>
-          <text x="110" y="105" text-anchor="middle" class="pie-chart-label">Share</text>
-          <text x="110" y="127" text-anchor="middle" class="pie-chart-value">{{ channel_rows|length }} canales</text>
-        </svg>
-        <div class="chart-legend channel-seconds-legend">
-          {% for row in channel_rows %}
-          <span><i style="background: {{ row.color }}"></i>{{ row.canal }}</span>
-          {% endfor %}
-        </div>
-      </div>
-      {% else %}
-      <p class="empty-state">No hay datos para graficar.</p>
-      {% endif %}
-    </article>
-
     <article class="panel dashboard-bar-panel">
       <div class="panel-header">
         <div>
@@ -202,7 +175,8 @@
       {% include "partials/grouped_bar_chart.html" %}
     </article>
 
-    <aside class="panel dashboard-side-panel">
+    <div class="dashboard-left-stack">
+      <aside class="panel dashboard-side-panel">
       <div class="panel-header">
         <div>
           <p class="eyebrow">Participación</p>
@@ -219,9 +193,9 @@
         <p class="empty-state">No hay valores de alcance.</p>
         {% endfor %}
       </div>
-    </aside>
+      </aside>
 
-    <aside class="panel dashboard-category-panel">
+      <aside class="panel dashboard-category-panel">
       <div class="panel-header">
         <div>
           <p class="eyebrow">Participación</p>
@@ -238,7 +212,8 @@
         <p class="empty-state">No hay valores de categoría.</p>
         {% endfor %}
       </div>
-    </aside>
+      </aside>
+    </div>
 
     <article class="panel dashboard-main-table">
       <div class="panel-header">

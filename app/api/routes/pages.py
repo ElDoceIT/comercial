@@ -1,4 +1,6 @@
 import csv
+import logging
+import secrets
 import zipfile
 from io import BytesIO, StringIO
 import math
@@ -6,13 +8,15 @@ import unicodedata
 from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
+from time import perf_counter
 from xml.sax.saxutils import escape
 from urllib.parse import parse_qs, quote
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Integer, String, cast, func, literal, or_
+from sqlalchemy import func, literal, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from app.db import get_db
@@ -22,6 +26,9 @@ from app.models.base_anunciantes import BaseAnunciante
 from app.models.cronogramas import Cronograma
 from app.models.maestro_productos import MaestroProducto
 from app.models.productos_temas import ProductoTema
+from app.models.usuarios import Usuario
+from app.services.ad_auth import ActiveDirectoryAuthError, list_ad_group_users
+from app.services.local_auth import hash_password, normalize_username
 from app.services.processing_service import (
     DuplicateArchivoIngestaError,
     ProcessingService,
@@ -32,6 +39,7 @@ from app.services.drive_service import DriveService, DriveServiceError
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+logger = logging.getLogger(__name__)
 
 router = APIRouter(include_in_schema=False)
 PIE_COLORS = [
@@ -95,7 +103,7 @@ EXPORT_CRONOGRAMAS_COMPLETA_COLUMNS = [
 
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
-    return RedirectResponse(url="/archivos", status_code=303)
+    return RedirectResponse(url="/envio-monitor", status_code=303)
 
 
 @router.post("/run-drive-process", response_class=HTMLResponse)
@@ -178,7 +186,7 @@ def _get_unmatched_product_rows(
     fecha_hasta: str | None,
     archivo_id: int | None,
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    duracion_expr = func.sum(Cronograma.duracion).label("segundos")
     filas_expr = func.count(Cronograma.id).label("filas")
     ultima_fecha_expr = func.max(Cronograma.fecha).label("ultima_fecha")
     query = (
@@ -230,7 +238,7 @@ def _get_matched_product_rows(
     fecha_hasta: str | None,
     archivo_id: int | None,
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    duracion_expr = func.sum(Cronograma.duracion).label("segundos")
     filas_expr = func.count(Cronograma.id).label("filas")
     ultima_fecha_expr = func.max(Cronograma.fecha).label("ultima_fecha")
     temas_registrados = (
@@ -357,6 +365,13 @@ def _normalize_match_text(value: object) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(char for char in text if not unicodedata.combining(char))
     return " ".join(text.split())
+
+
+def _is_commercial_excluded_category(value: object) -> bool:
+    category = _normalize_match_text(value)
+    return category in {"SIN CARGO", "ASOCIACION CIVIL", "ELECCIONES"} or (
+        "PROM" in category and "CANAL" in category
+    )
 
 
 def _match_text_expr(column):
@@ -938,7 +953,7 @@ def _resolve_auto_anunciante(
 
 
 def _get_auto_assignment_candidates(db: Session):
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    duracion_expr = func.sum(Cronograma.duracion).label("segundos")
     filas_expr = func.count(Cronograma.id).label("filas")
     query = (
         db.query(
@@ -1257,7 +1272,7 @@ def _get_control_rows_by_product_codes(
     if not cod_productos:
         return []
 
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("segundos")
+    duracion_expr = func.sum(Cronograma.duracion).label("segundos")
     filas_expr = func.count(Cronograma.id).label("filas")
     ultima_fecha_expr = func.max(Cronograma.fecha).label("ultima_fecha")
     temas_registrados = (
@@ -1410,12 +1425,7 @@ def productos_view(
 
     if q:
         search = f"%{q.strip()}%"
-        query = query.filter(
-            or_(
-                MaestroProducto.producto.ilike(search),
-                BaseAnunciante.anunciante.ilike(search),
-            )
-        )
+        query = query.filter(MaestroProducto.producto.ilike(search))
     if selected_id_anunciante is not None:
         query = query.filter(MaestroProducto.id_anunciante == selected_id_anunciante)
     if categoria:
@@ -1447,7 +1457,6 @@ def productos_view(
             "productos": productos,
             "anunciantes": anunciantes,
             "categorias": categorias,
-            "alcances": _get_distinct_base_anunciante_values(db, BaseAnunciante.alcance),
             "filters": {
                 "q": q or "",
                 "id_anunciante": selected_id_anunciante or "",
@@ -1501,7 +1510,7 @@ async def update_anunciante(request: Request, db: Session = Depends(get_db)):
 
     if id_anunciante is None:
         return RedirectResponse(
-            url=_productos_redirect_url(status="error", message="Anunciante inválido."),
+            url=_anunciantes_redirect_url(status="error", message="Anunciante inválido."),
             status_code=303,
         )
 
@@ -1512,7 +1521,7 @@ async def update_anunciante(request: Request, db: Session = Depends(get_db)):
     )
     if anunciante is None:
         return RedirectResponse(
-            url=_productos_redirect_url(status="error", message="Anunciante no encontrado."),
+            url=_anunciantes_redirect_url(status="error", message="Anunciante no encontrado."),
             status_code=303,
         )
 
@@ -1522,13 +1531,222 @@ async def update_anunciante(request: Request, db: Session = Depends(get_db)):
     db.commit()
 
     return RedirectResponse(
-        url=_productos_redirect_url(status="ok", message="Anunciante actualizado."),
+        url=_anunciantes_redirect_url(status="ok", message="Anunciante actualizado."),
         status_code=303,
     )
 
 
 def _productos_redirect_url(*, status: str, message: str) -> str:
     return f"/productos?status={quote(status)}&message={quote(message)}"
+
+
+def _anunciantes_redirect_url(*, status: str, message: str) -> str:
+    return f"/anunciantes?status={quote(status)}&message={quote(message)}"
+
+
+@router.get("/anunciantes", response_class=HTMLResponse)
+def anunciantes_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    q: str | None = Query(default=None),
+    categoria: str | None = Query(default=None),
+):
+    query = db.query(BaseAnunciante)
+    if q:
+        query = query.filter(BaseAnunciante.anunciante.ilike(f"%{q.strip()}%"))
+    if categoria:
+        query = query.filter(BaseAnunciante.categoria == categoria)
+
+    anunciantes = (
+        query.order_by(BaseAnunciante.anunciante.asc(), BaseAnunciante.id_anunciante.asc())
+        .limit(500)
+        .all()
+    )
+    categorias = _get_distinct_base_anunciante_values(db, BaseAnunciante.categoria)
+    return templates.TemplateResponse(
+        request,
+        "anunciantes.html",
+        {
+            "anunciantes": anunciantes,
+            "alcances": _get_distinct_base_anunciante_values(db, BaseAnunciante.alcance),
+            "categorias": categorias,
+            "filters": {"q": q or "", "categoria": categoria or ""},
+            "status": request.query_params.get("status", ""),
+            "message": request.query_params.get("message", ""),
+        },
+    )
+
+
+def _require_admin(request: Request) -> None:
+    role = str((request.session.get("user") or {}).get("role") or "").upper()
+    if role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Se requiere el rol ADMIN.")
+
+
+def _usuarios_redirect(*, guardado: str | None = None, error: str | None = None) -> str:
+    if error:
+        return f"/configuracion/usuarios?error={quote(error)}"
+    return f"/configuracion/usuarios?guardado={quote(guardado or '')}"
+
+
+@router.get("/configuracion/usuarios", response_class=HTMLResponse)
+def usuarios_view(
+    request: Request,
+    editar_usuario: int | None = Query(default=None),
+    consultar_ad: bool = Query(default=False),
+    guardado: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    _require_admin(request)
+    usuarios = db.query(Usuario).order_by(Usuario.apellido, Usuario.nombre).all()
+    usuario_edicion = db.get(Usuario, editar_usuario) if editar_usuario else None
+    usuarios_ad = None
+    error_ad = None
+    if consultar_ad:
+        try:
+            usuarios_ad = list_ad_group_users()
+        except ActiveDirectoryAuthError as exc:
+            usuarios_ad, error_ad = [], str(exc)
+    roles = sorted({"ADMIN", "USUARIO", *(u.rol for u in usuarios if u.rol)})
+    perfiles = sorted({"ADMIN", "OPERADOR", *(u.perfil for u in usuarios if u.perfil)})
+    return templates.TemplateResponse(request, "usuarios.html", {
+        "usuarios": usuarios,
+        "usuario_edicion": usuario_edicion,
+        "usuarios_ad": usuarios_ad,
+        "error_ad": error_ad,
+        "guardado": guardado,
+        "error": error,
+        "roles": roles,
+        "perfiles": perfiles,
+    })
+
+
+@router.post("/configuracion/usuarios")
+async def crear_usuario(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    form = await _read_urlencoded_form(request)
+    username = normalize_username(form.get("username", ""))
+    password = form.get("password", "")
+    origen = form.get("origen", "LOCAL").strip().upper()
+    if not all((form.get("nombre", "").strip(), form.get("apellido", "").strip(), username)):
+        return RedirectResponse(_usuarios_redirect(error="Completá los campos obligatorios."), 303)
+    if db.query(Usuario).filter(func.lower(Usuario.username) == username).first():
+        return RedirectResponse(_usuarios_redirect(error="El usuario ya existe."), 303)
+    if origen == "LOCAL" and len(password) < 8:
+        return RedirectResponse(_usuarios_redirect(error="La contraseña debe tener al menos 8 caracteres."), 303)
+    usuario = Usuario(
+        nombre=form.get("nombre", "").strip(),
+        apellido=form.get("apellido", "").strip(),
+        correo=form.get("correo", "").strip() or None,
+        username=username,
+        hashed_password=hash_password(password or secrets.token_urlsafe(32)),
+        origen=origen,
+        status=form.get("status") == "on",
+        rol=form.get("rol", "").strip().upper() or None,
+        perfil=form.get("perfil", "").strip().upper() or None,
+    )
+    db.add(usuario)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return RedirectResponse(_usuarios_redirect(error="No se pudo crear: hay datos duplicados."), 303)
+    return RedirectResponse(_usuarios_redirect(guardado="Usuario creado."), 303)
+
+
+@router.post("/configuracion/usuarios/{usuario_id}")
+async def actualizar_usuario(usuario_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    usuario = db.get(Usuario, usuario_id)
+    if usuario is None:
+        raise HTTPException(status_code=404, detail="El usuario no existe.")
+    form = await _read_urlencoded_form(request)
+    username = normalize_username(form.get("username", ""))
+    duplicate = db.query(Usuario).filter(
+        func.lower(Usuario.username) == username,
+        Usuario.id != usuario_id,
+    ).first()
+    if duplicate:
+        return RedirectResponse(_usuarios_redirect(error="El nombre de usuario ya existe."), 303)
+    usuario.nombre = form.get("nombre", "").strip()
+    usuario.apellido = form.get("apellido", "").strip()
+    usuario.correo = form.get("correo", "").strip() or None
+    usuario.username = username
+    usuario.origen = form.get("origen", "LOCAL").strip().upper()
+    usuario.status = form.get("status") == "on"
+    usuario.rol = form.get("rol", "").strip().upper() or None
+    usuario.perfil = form.get("perfil", "").strip().upper() or None
+    password = form.get("password", "")
+    if password:
+        if len(password) < 8:
+            return RedirectResponse(_usuarios_redirect(error="La contraseña debe tener al menos 8 caracteres."), 303)
+        usuario.hashed_password = hash_password(password)
+    db.commit()
+    return RedirectResponse(_usuarios_redirect(guardado="Usuario actualizado."), 303)
+
+
+@router.get("/configuracion/usuarios/sincronizar", response_class=HTMLResponse)
+def usuarios_ad_sync_view(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    try:
+        ad_users = list_ad_group_users()
+        error = None
+    except ActiveDirectoryAuthError as exc:
+        ad_users, error = [], str(exc)
+    usuarios = db.query(Usuario).all()
+    local = {normalize_username(user.username): user for user in usuarios}
+    ad = {normalize_username(user.username): user for user in ad_users}
+    return templates.TemplateResponse(request, "usuarios_ad_sync.html", {
+        "new_users": [user for key, user in ad.items() if key not in local],
+        "existing_users": [local[key] for key in ad if key in local and local[key].status],
+        "reactivable_users": [local[key] for key in ad if key in local and not local[key].status],
+        "inactive_users": [user for key, user in local.items() if user.origen.upper() == "AD" and user.status and key not in ad],
+        "error": error,
+    })
+
+
+@router.post("/configuracion/usuarios/sincronizar/incorporar")
+async def incorporar_usuario_ad(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    form = await _read_urlencoded_form(request)
+    username = normalize_username(form.get("username", ""))
+    if db.query(Usuario).filter(func.lower(Usuario.username) == username).first():
+        return RedirectResponse("/configuracion/usuarios/sincronizar", 303)
+    try:
+        ad_user = next(
+            (item for item in list_ad_group_users() if normalize_username(item.username) == username),
+            None,
+        )
+    except ActiveDirectoryAuthError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if ad_user is None:
+        raise HTTPException(status_code=409, detail="El usuario ya no pertenece al grupo AD.")
+    usuario = Usuario(
+        nombre=form.get("nombre", "").strip() or ad_user.first_name,
+        apellido=form.get("apellido", "").strip() or ad_user.last_name,
+        correo=form.get("correo", "").strip() or ad_user.email,
+        username=username,
+        hashed_password=hash_password(secrets.token_urlsafe(32)),
+        origen="AD",
+        status=True,
+        rol=form.get("rol", "USUARIO").strip().upper(),
+        perfil=form.get("perfil", "OPERADOR").strip().upper(),
+    )
+    db.add(usuario)
+    db.commit()
+    return RedirectResponse("/configuracion/usuarios/sincronizar", 303)
+
+
+@router.post("/configuracion/usuarios/sincronizar/{usuario_id}/reactivar")
+def reactivar_usuario_ad(usuario_id: int, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request)
+    usuario = db.get(Usuario, usuario_id)
+    if usuario is None or usuario.origen.upper() != "AD":
+        raise HTTPException(status_code=404, detail="El usuario AD no existe.")
+    usuario.status = True
+    db.commit()
+    return RedirectResponse("/configuracion/usuarios/sincronizar", 303)
 
 
 @router.get("/control-productos", response_class=HTMLResponse)
@@ -1539,38 +1757,67 @@ def control_productos_view(
     fecha_hasta: str | None = Query(default=None),
     archivo_id: str | None = Query(default=None),
     auto_codes: str | None = Query(default=None),
+    mostrar_sugerencias: bool = Query(default=False),
 ):
+    page_started_at = perf_counter()
+
+    def log_block(label: str, started_at: float) -> None:
+        logger.warning(
+            "CONTROL %-24s %8.1f ms",
+            label,
+            (perf_counter() - started_at) * 1000,
+        )
+
     selected_archivo_id = _parse_optional_int(archivo_id)
     auto_cod_productos = _parse_int_list(auto_codes)
+
+    block_started_at = perf_counter()
     anunciantes = (
         db.query(BaseAnunciante)
         .order_by(BaseAnunciante.anunciante.asc(), BaseAnunciante.id_anunciante.asc())
         .all()
     )
+    log_block("anunciantes", block_started_at)
+
+    block_started_at = perf_counter()
     archivos = (
         db.query(ArchivoIngesta)
         .order_by(ArchivoIngesta.fecha_inicio_proceso.desc(), ArchivoIngesta.id.desc())
         .limit(100)
         .all()
     )
+    log_block("archivos", block_started_at)
+
+    block_started_at = perf_counter()
     min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
     max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
+    log_block("date_limits", block_started_at)
+
+    block_started_at = perf_counter()
     alcances = _get_distinct_base_anunciante_values(db, BaseAnunciante.alcance)
     categorias = _get_distinct_base_anunciante_values(db, BaseAnunciante.categoria)
+    log_block("distinct_options", block_started_at)
+
+    block_started_at = perf_counter()
     unmatched_rows = _get_unmatched_product_rows(
         db,
         fecha_desde=fecha_desde,
         fecha_hasta=fecha_hasta,
         archivo_id=selected_archivo_id,
     )
-    matched_rows = _get_matched_product_rows(
-        db,
-        fecha_desde=fecha_desde,
-        fecha_hasta=fecha_hasta,
-        archivo_id=selected_archivo_id,
-    )
-    auto_suggestion_rows = _get_auto_assignment_suggestion_rows(db)
+    log_block("unmatched_rows", block_started_at)
+
+    if mostrar_sugerencias:
+        block_started_at = perf_counter()
+        auto_suggestion_rows = _get_auto_assignment_suggestion_rows(db)
+        log_block("auto_suggestion_rows", block_started_at)
+    else:
+        auto_suggestion_rows = []
+
+    block_started_at = perf_counter()
     auto_assigned_rows = _get_control_rows_by_product_codes(db, auto_cod_productos)
+    log_block("auto_assigned_rows", block_started_at)
+    log_block("TOTAL", page_started_at)
 
     return templates.TemplateResponse(
         request,
@@ -1581,8 +1828,8 @@ def control_productos_view(
             "alcances": alcances,
             "categorias": categorias,
             "unmatched_rows": unmatched_rows,
-            "matched_rows": matched_rows,
             "auto_suggestion_rows": auto_suggestion_rows,
+            "mostrar_sugerencias": mostrar_sugerencias,
             "auto_assigned_rows": auto_assigned_rows,
             "min_fecha": min_fecha,
             "max_fecha": max_fecha,
@@ -1649,16 +1896,23 @@ async def assign_control_producto(request: Request, db: Session = Depends(get_db
     )
 
 
-@router.post("/control-productos/anunciante", response_class=HTMLResponse)
+@router.post("/anunciantes/crear", response_class=HTMLResponse)
 async def create_control_anunciante(request: Request, db: Session = Depends(get_db)):
     form = await _read_urlencoded_form(request)
+    return_to_control = form.get("return_to") == "control-productos"
+
+    def redirect_url(*, status: str, message: str) -> str:
+        if return_to_control:
+            return _control_productos_redirect_url(status=status, message=message)
+        return _anunciantes_redirect_url(status=status, message=message)
+
     anunciante = str(form.get("anunciante") or "").strip()
     alcance = str(form.get("alcance") or "").strip() or None
     categoria = str(form.get("categoria") or "").strip() or None
 
     if not anunciante:
         return RedirectResponse(
-            url=_control_productos_redirect_url(
+            url=redirect_url(
                 status="error",
                 message="El nombre del anunciante es obligatorio.",
             ),
@@ -1674,7 +1928,7 @@ async def create_control_anunciante(request: Request, db: Session = Depends(get_
     )
     db.commit()
     return RedirectResponse(
-        url=_control_productos_redirect_url(
+        url=redirect_url(
             status="ok",
             message=f"Anunciante {anunciante} creado.",
         ),
@@ -1745,7 +1999,17 @@ def envio_monitor_view(
     prom_canal: str | None = Query(default=None),
     ranking_alcance: str | None = Query(default=None),
     ranking_categoria: str | None = Query(default=None),
+    filtro_comercial: bool = Query(default=False),
 ):
+    page_started_at = perf_counter()
+
+    def log_block(label: str, started_at: float) -> None:
+        logger.warning(
+            "ENVIO_MONITOR %-24s %8.1f ms",
+            label,
+            (perf_counter() - started_at) * 1000,
+        )
+
     today = date.today()
     default_fecha_desde = today - timedelta(days=8)
     default_fecha_hasta = today - timedelta(days=1)
@@ -1766,7 +2030,20 @@ def envio_monitor_view(
     selected_categorias = _clean_multi_values(categoria)
     selected_anunciantes = _clean_multi_values(anunciante)
     selected_tipos_dia = _clean_multi_values(tipo_dia)
+    block_started_at = perf_counter()
     filter_options = _get_envio_filter_options(db)
+    log_block("filter_options", block_started_at)
+    if filtro_comercial:
+        selected_alcances = [
+            item
+            for item in filter_options["alcances"]
+            if _normalize_match_text(item) == "LOCAL"
+        ]
+        selected_categorias = [
+            item
+            for item in filter_options["categorias"]
+            if not _is_commercial_excluded_category(item)
+        ]
     selected_alcances = _normalize_all_selected(selected_alcances, filter_options["alcances"])
     selected_categorias = _normalize_all_selected(
         selected_categorias,
@@ -1780,6 +2057,7 @@ def envio_monitor_view(
         selected_tipos_dia,
         filter_options["tipos_dia"],
     )
+    block_started_at = perf_counter()
     total_duracion = _get_envio_total_duration(
         db=db,
         fecha_desde=fecha_desde,
@@ -1790,7 +2068,9 @@ def envio_monitor_view(
         tipos_dia=selected_tipos_dia,
         prom_canal=prom_canal,
     )
+    log_block("total_duration", block_started_at)
 
+    block_started_at = perf_counter()
     main_rows = _get_envio_main_rows(
         db=db,
         total_duracion=total_duracion,
@@ -1804,6 +2084,9 @@ def envio_monitor_view(
         ranking_alcance=ranking_alcance,
         ranking_categoria=ranking_categoria,
     )
+    log_block("main_rows", block_started_at)
+
+    block_started_at = perf_counter()
     product_breakdowns = _get_envio_ranking_product_rows(
         db=db,
         fecha_desde=fecha_desde,
@@ -1817,11 +2100,13 @@ def envio_monitor_view(
         ranking_categoria=ranking_categoria,
         main_rows=main_rows,
     )
+    log_block("ranking_product_rows", block_started_at)
     for row in main_rows:
         row["products"] = product_breakdowns.get(
             _envio_ranking_key(row["alcance"], row["anunciante"], row["canal"]),
             [],
         )
+    block_started_at = perf_counter()
     side_rows = _get_envio_side_rows(
         db=db,
         total_duracion=total_duracion,
@@ -1832,6 +2117,9 @@ def envio_monitor_view(
         anunciantes=selected_anunciantes,
         tipos_dia=selected_tipos_dia,
     )
+    log_block("side_rows", block_started_at)
+
+    block_started_at = perf_counter()
     category_side_rows = _get_envio_category_side_rows(
         db=db,
         total_duracion=total_duracion,
@@ -1842,6 +2130,9 @@ def envio_monitor_view(
         anunciantes=selected_anunciantes,
         tipos_dia=selected_tipos_dia,
     )
+    log_block("category_side_rows", block_started_at)
+
+    block_started_at = perf_counter()
     channel_rows = _get_envio_channel_rows(
         db=db,
         total_duracion=total_duracion,
@@ -1853,6 +2144,9 @@ def envio_monitor_view(
         tipos_dia=selected_tipos_dia,
         prom_canal=prom_canal,
     )
+    log_block("channel_rows", block_started_at)
+
+    block_started_at = perf_counter()
     line_chart = _build_line_chart(
         _get_envio_date_channel_rows(
             db=db,
@@ -1865,6 +2159,9 @@ def envio_monitor_view(
             prom_canal=prom_canal,
         )
     )
+    log_block("date_channel_chart", block_started_at)
+
+    block_started_at = perf_counter()
     hour_chart = _build_grouped_bar_chart(
         _get_envio_hour_channel_rows(
             db=db,
@@ -1879,6 +2176,9 @@ def envio_monitor_view(
         label_key="hora",
         label_order=None,
     )
+    log_block("hour_channel_chart", block_started_at)
+
+    block_started_at = perf_counter()
     weekday_chart = _build_grouped_bar_chart(
         _get_envio_weekday_channel_rows(
             db=db,
@@ -1893,6 +2193,9 @@ def envio_monitor_view(
         label_key="dia",
         label_order=[WEEKDAY_LABELS[index] for index in range(1, 8)],
     )
+    log_block("weekday_channel_chart", block_started_at)
+
+    block_started_at = perf_counter()
     total_validation = _get_envio_total_validation(
         db=db,
         fecha_desde=fecha_desde,
@@ -1900,10 +2203,15 @@ def envio_monitor_view(
         tipos_dia=selected_tipos_dia,
         prom_canal=prom_canal,
     )
+    log_block("total_validation", block_started_at)
 
+    block_started_at = perf_counter()
     min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
     max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
     ultima_fecha_cargada = db.query(func.max(Cronograma.fecha)).scalar()
+    log_block("date_limits", block_started_at)
+
+    log_block("TOTAL", page_started_at)
 
     return templates.TemplateResponse(
         request,
@@ -1919,6 +2227,7 @@ def envio_monitor_view(
                 "prom_canal": prom_canal or "",
                 "ranking_alcance": ranking_alcance or "",
                 "ranking_categoria": ranking_categoria or "",
+                "filtro_comercial": filtro_comercial,
             },
             "filter_options": filter_options,
             "quick_date_ranges": quick_date_ranges,
@@ -1930,12 +2239,267 @@ def envio_monitor_view(
             "side_rows": side_rows,
             "category_side_rows": category_side_rows,
             "channel_rows": channel_rows,
-            "pie_segments": _build_pie_chart_segments(channel_rows),
             "line_chart": line_chart,
             "hour_chart": hour_chart,
             "weekday_chart": weekday_chart,
             "total_validation": total_validation,
         },
+    )
+
+
+@router.get("/alertas-comerciales", response_class=HTMLResponse)
+def alertas_comerciales_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+):
+    today = date.today()
+    default_fecha_hasta = today - timedelta(days=1)
+    quick_date_ranges = {
+        "ultimos_15": {
+            "fecha_desde": (today - timedelta(days=15)).isoformat(),
+            "fecha_hasta": default_fecha_hasta.isoformat(),
+        },
+        "ultimo_mes": {
+            "fecha_desde": (today - timedelta(days=30)).isoformat(),
+            "fecha_hasta": default_fecha_hasta.isoformat(),
+        },
+    }
+    fecha_desde = fecha_desde or quick_date_ranges["ultimos_15"]["fecha_desde"]
+    fecha_hasta = fecha_hasta or quick_date_ranges["ultimos_15"]["fecha_hasta"]
+
+    category_options = _get_distinct_base_anunciante_values(db, BaseAnunciante.categoria)
+    selected_categories = _clean_multi_values(categoria)
+    if categoria is None:
+        selected_categories = [
+            item
+            for item in category_options
+            if _normalize_match_text(item) in {"OFICIAL", "OFICIAL INTERIOR"}
+        ]
+
+    alert_rows = _get_commercial_alert_rows(
+        db=db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        categories=selected_categories,
+    )
+    advertiser_count = len({str(item["anunciante"]) for item in alert_rows})
+    critical_count = len({
+        str(item["anunciante"])
+        for item in alert_rows
+        if item["critical"]
+    })
+
+    return templates.TemplateResponse(
+        request,
+        "alertas_comerciales.html",
+        {
+            "filters": {
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+                "categorias": selected_categories,
+            },
+            "quick_date_ranges": quick_date_ranges,
+            "category_options": category_options,
+            "alert_rows": alert_rows,
+            "advertiser_count": advertiser_count,
+            "critical_count": critical_count,
+        },
+    )
+
+
+@router.get("/alertas-comerciales/exportar")
+def export_alertas_comerciales(
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+) -> Response:
+    selected_categories = _clean_multi_values(categoria)
+    if categoria is None:
+        selected_categories = [
+            item
+            for item in _get_distinct_base_anunciante_values(db, BaseAnunciante.categoria)
+            if _normalize_match_text(item) in {"OFICIAL", "OFICIAL INTERIOR"}
+        ]
+    alert_rows = _get_commercial_alert_rows(
+        db=db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        categories=selected_categories,
+    )
+    export_rows = [
+        {
+            "estado": "Crítica" if row["critical"] else "Atención",
+            "anunciante": row["anunciante"],
+            "canal_12_seconds": row["canal_12_seconds"],
+            "competitor": row["competitor"],
+            "competitor_seconds": row["competitor_seconds"],
+            "difference": row["difference"],
+            "brecha": (
+                f'{float(row["difference_percentage"]):.1f}%'
+                if row["difference_percentage"] is not None
+                else "Sin pauta en C12"
+            ),
+        }
+        for row in alert_rows
+    ]
+    columns = [
+        ("Estado", "estado"),
+        ("Anunciante", "anunciante"),
+        ("Segundos Canal 12", "canal_12_seconds"),
+        ("Canal competidor", "competitor"),
+        ("Segundos competidor", "competitor_seconds"),
+        ("Diferencia segundos", "difference"),
+        ("Brecha", "brecha"),
+    ]
+    content = _build_xlsx_response_content(export_rows, columns=columns)
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="alertas_comerciales.xlsx"'},
+    )
+
+
+@router.get("/alertas-comerciales/detalle", response_class=HTMLResponse)
+def alerta_comercial_detail_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    anunciante: str = Query(...),
+    canal: str = Query(...),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+):
+    selected_categories = _clean_multi_values(categoria)
+    if categoria is None:
+        selected_categories = [
+            item
+            for item in _get_distinct_base_anunciante_values(db, BaseAnunciante.categoria)
+            if _normalize_match_text(item) in {"OFICIAL", "OFICIAL INTERIOR"}
+        ]
+
+    def apply_detail_filters(query):
+        query = query.filter(_envio_anunciante_expr() == anunciante)
+        if fecha_desde:
+            query = query.filter(Cronograma.fecha >= fecha_desde)
+        if fecha_hasta:
+            query = query.filter(Cronograma.fecha <= fecha_hasta)
+        if selected_categories:
+            query = query.filter(_envio_categoria_expr().in_(selected_categories))
+        return query
+
+    daily_query = _envio_base_query(
+        db,
+        Cronograma.fecha,
+        Cronograma.canal,
+        func.sum(Cronograma.duracion).label("duracion_total"),
+    )
+    daily_rows = (
+        apply_detail_filters(daily_query)
+        .filter(
+            Cronograma.fecha.isnot(None),
+            Cronograma.canal.in_([canal, "Canal 12"]),
+        )
+        .group_by(Cronograma.fecha, Cronograma.canal)
+        .order_by(Cronograma.fecha.asc(), Cronograma.canal.asc())
+        .all()
+    )
+    line_chart = _build_line_chart([
+        {
+            "fecha": row.fecha,
+            "canal": row.canal,
+            "duracion_total": int(row.duracion_total or 0),
+        }
+        for row in daily_rows
+    ])
+    competitor_daily_rows = [row for row in daily_rows if row.canal == canal]
+    product_query = _envio_base_query(
+        db,
+        Cronograma.producto,
+        Cronograma.tema,
+        func.sum(Cronograma.duracion).label("duracion_total"),
+    )
+    product_rows = (
+        apply_detail_filters(product_query)
+        .filter(Cronograma.canal == canal)
+        .group_by(Cronograma.producto, Cronograma.tema)
+        .order_by(func.sum(Cronograma.duracion).desc())
+        .all()
+    )
+
+    return templates.TemplateResponse(
+        request,
+        "partials/alerta_comercial_detalle.html",
+        {
+            "anunciante": anunciante,
+            "canal": canal,
+            "line_chart": line_chart,
+            "daily_rows": competitor_daily_rows,
+            "product_rows": product_rows,
+        },
+    )
+
+
+def _get_commercial_alert_rows(
+    *,
+    db: Session,
+    fecha_desde: str | None,
+    fecha_hasta: str | None,
+    categories: list[str],
+) -> list[dict[str, object]]:
+    advertiser_expr = _envio_anunciante_expr().label("anunciante")
+    query = _envio_base_query(
+        db,
+        advertiser_expr,
+        Cronograma.canal,
+        func.sum(Cronograma.duracion).label("duracion_total"),
+    )
+    if fecha_desde:
+        query = query.filter(Cronograma.fecha >= fecha_desde)
+    if fecha_hasta:
+        query = query.filter(Cronograma.fecha <= fecha_hasta)
+    if categories:
+        query = query.filter(_envio_categoria_expr().in_(categories))
+    grouped_rows = (
+        query.filter(Cronograma.canal.isnot(None))
+        .group_by(advertiser_expr, Cronograma.canal)
+        .all()
+    )
+
+    seconds_by_advertiser: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    channel_labels: dict[str, str] = {}
+    for row in grouped_rows:
+        advertiser = str(row.anunciante or "Sin anunciante").strip()
+        channel = str(row.canal or "").strip()
+        channel_key = _normalize_match_text(channel)
+        if not channel_key:
+            continue
+        seconds_by_advertiser[advertiser][channel_key] += int(row.duracion_total or 0)
+        channel_labels.setdefault(channel_key, channel)
+
+    alert_rows: list[dict[str, object]] = []
+    for advertiser, channel_seconds in seconds_by_advertiser.items():
+        canal_12_seconds = channel_seconds.get("CANAL 12", 0)
+        for channel_key, competitor_seconds in channel_seconds.items():
+            if channel_key == "CANAL 12" or competitor_seconds <= canal_12_seconds:
+                continue
+            difference = competitor_seconds - canal_12_seconds
+            percentage = difference / canal_12_seconds * 100 if canal_12_seconds else None
+            alert_rows.append({
+                "anunciante": advertiser,
+                "canal_12_seconds": canal_12_seconds,
+                "competitor": channel_labels[channel_key],
+                "competitor_seconds": competitor_seconds,
+                "difference": difference,
+                "difference_percentage": percentage,
+                "critical": canal_12_seconds == 0 or percentage >= 50,
+            })
+    return sorted(
+        alert_rows,
+        key=lambda item: (0 if item["critical"] else 1, -int(item["difference"])),
     )
 
 
@@ -2030,6 +2594,35 @@ def archivos_view(request: Request, db: Session = Depends(get_db)):
         .limit(300)
         .all()
     )
+    missing_period_end = date.today() - timedelta(days=1)
+    missing_period_start = date.today() - timedelta(days=30)
+    channel_codes = {
+        "1551": "Canal 8",
+        "1553": "Canal 10",
+        "1554": "Canal 12",
+    }
+    expected_channels = set(channel_codes)
+    received_by_date: dict[date, set[str]] = defaultdict(set)
+    received_rows = (
+        db.query(ArchivoIngesta.fecha_nombre_archivo, ArchivoIngesta.canal_codigo)
+        .filter(
+            ArchivoIngesta.fecha_nombre_archivo >= missing_period_start,
+            ArchivoIngesta.fecha_nombre_archivo <= missing_period_end,
+            ArchivoIngesta.canal_codigo.in_(expected_channels),
+        )
+        .distinct()
+        .all()
+    )
+    for received_date, channel_code in received_rows:
+        if received_date and channel_code:
+            received_by_date[received_date].add(str(channel_code).strip())
+
+    missing_channels = [
+        {"fecha": received_date, "canal": channel_codes[channel_code]}
+        for received_date, received_channels in received_by_date.items()
+        for channel_code in sorted(expected_channels - received_channels, key=int)
+    ]
+    missing_channels.sort(key=lambda item: (item["fecha"], item["canal"]), reverse=True)
 
     return templates.TemplateResponse(
         request,
@@ -2041,6 +2634,7 @@ def archivos_view(request: Request, db: Session = Depends(get_db)):
             "productos_count": productos_count,
             "anunciantes_count": anunciantes_count,
             "ultima_fecha_cargada": ultima_fecha_cargada,
+            "missing_channels": missing_channels,
             "process_status": request.query_params.get("process_status", ""),
             "process_message": request.query_params.get("process_message", ""),
         },
@@ -2418,7 +3012,7 @@ def _get_envio_total_duration(
 ) -> int:
     query = _envio_base_query(
         db,
-        func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total"),
+        func.sum(Cronograma.duracion).label("duracion_total"),
     )
     query = _apply_envio_filters(
         query,
@@ -2461,7 +3055,7 @@ def _get_envio_total_validation(
     prom_canal: str | None,
 ) -> dict[str, object]:
     raw_query = db.query(
-        func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+        func.sum(Cronograma.duracion).label("duracion_total")
     )
     raw_query = _apply_envio_raw_control_filters(
         raw_query,
@@ -2474,7 +3068,7 @@ def _get_envio_total_validation(
 
     joined_query = _envio_base_query(
         db,
-        func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total"),
+        func.sum(Cronograma.duracion).label("duracion_total"),
     )
     joined_query = _apply_envio_raw_control_filters(
         joined_query,
@@ -2510,7 +3104,7 @@ def _get_envio_main_rows(
 ) -> list[dict[str, object]]:
     alcance_expr = _envio_alcance_expr().label("alcance")
     anunciante_expr = _envio_anunciante_expr().label("anunciante")
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     query = _envio_base_query(
         db,
         alcance_expr,
@@ -2584,7 +3178,7 @@ def _get_envio_ranking_product_rows(
     anunciante_expr = _envio_anunciante_expr().label("anunciante")
     producto_expr = func.coalesce(Cronograma.producto, literal("Sin producto")).label("producto")
     tema_expr = func.coalesce(Cronograma.tema, literal("Sin tema")).label("tema")
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
 
     query = _envio_base_query(
         db,
@@ -2649,7 +3243,7 @@ def _get_envio_side_rows(
     anunciantes: list[str],
     tipos_dia: list[str],
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     alcance_expr = _envio_alcance_expr().label("alcance")
     query = _envio_base_query(db, alcance_expr, duracion_expr)
     query = _apply_envio_filters(
@@ -2692,7 +3286,7 @@ def _get_envio_category_side_rows(
     anunciantes: list[str],
     tipos_dia: list[str],
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     categoria_expr = _envio_categoria_expr().label("categoria")
     query = _envio_base_query(db, categoria_expr, duracion_expr)
     query = _apply_envio_filters(
@@ -2736,7 +3330,7 @@ def _get_envio_channel_rows(
     tipos_dia: list[str],
     prom_canal: str | None,
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     query = _envio_base_query(db, Cronograma.canal, duracion_expr)
     query = _apply_envio_filters(
         query,
@@ -2776,7 +3370,7 @@ def _get_envio_date_channel_rows(
     tipos_dia: list[str],
     prom_canal: str | None,
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     query = _envio_base_query(db, Cronograma.fecha, Cronograma.canal, duracion_expr)
     query = _apply_envio_filters(
         query,
@@ -2816,7 +3410,7 @@ def _get_envio_hour_channel_rows(
     tipos_dia: list[str],
     prom_canal: str | None,
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     query = _envio_base_query(db, Cronograma.hora_inicio, Cronograma.canal, duracion_expr)
     query = _apply_envio_filters(
         query,
@@ -2859,7 +3453,7 @@ def _get_envio_weekday_channel_rows(
     tipos_dia: list[str],
     prom_canal: str | None,
 ) -> list[dict[str, object]]:
-    duracion_expr = func.sum(cast(Cronograma.duracion, Integer)).label("duracion_total")
+    duracion_expr = func.sum(Cronograma.duracion).label("duracion_total")
     query = _envio_base_query(db, Cronograma.dia_semana, Cronograma.canal, duracion_expr)
     query = _apply_envio_filters(
         query,
@@ -2891,7 +3485,6 @@ def _get_envio_weekday_channel_rows(
 def _get_envio_filter_options(db: Session) -> dict[str, object]:
     alcance_expr = _clean_sql_text(BaseAnunciante.alcance)
     categoria_expr = _clean_sql_text(BaseAnunciante.categoria)
-    anunciante_expr = _envio_anunciante_expr()
     tipo_dia_expr = _envio_tipo_dia_expr()
 
     return {
@@ -2918,10 +3511,10 @@ def _get_envio_filter_options(db: Session) -> dict[str, object]:
         "anunciantes": _clean_multi_values(
             [
                 row[0]
-                for row in _envio_base_query(db, anunciante_expr)
-                .filter(anunciante_expr.isnot(None))
+                for row in db.query(BaseAnunciante.anunciante)
+                .filter(BaseAnunciante.anunciante.isnot(None))
                 .distinct()
-                .order_by(anunciante_expr.asc())
+                .order_by(BaseAnunciante.anunciante.asc())
                 .all()
             ]
         ),

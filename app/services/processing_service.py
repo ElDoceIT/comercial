@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pandas as pd
@@ -430,6 +431,9 @@ class ProcessingService:
                 normalized_df[column] = None
 
         normalized_df["fecha"] = normalized_df["fecha"].apply(self._parse_fecha_for_mysql)
+        normalized_df["duracion"] = normalized_df["duracion"].apply(
+            self._parse_duracion_for_mysql
+        )
         normalized_df["canal"] = normalized_df["canal"].apply(self._normalize_canal)
         normalized_df["dia_semana"] = normalized_df["fecha"].apply(
             lambda value: value.isoweekday() if value is not None else None
@@ -463,6 +467,29 @@ class ProcessingService:
         raise ProcessingServiceError(
             f"No se pudo convertir la fecha '{text}' a un formato valido para MySQL."
         )
+
+    def _parse_duracion_for_mysql(self, value: object) -> int | None:
+        if value is None or pd.isna(value) or str(value).strip() == "":
+            return None
+
+        text = str(value).strip().replace(",", ".")
+        try:
+            numeric_value = Decimal(text)
+        except InvalidOperation as error:
+            raise ProcessingServiceError(
+                f"La duración '{value}' no es un número válido."
+            ) from error
+
+        if (
+            not numeric_value.is_finite()
+            or numeric_value != numeric_value.to_integral_value()
+            or numeric_value < 0
+            or numeric_value > 2_147_483_647
+        ):
+            raise ProcessingServiceError(
+                f"La duración '{value}' debe ser un entero no negativo válido para MySQL."
+            )
+        return int(numeric_value)
 
     def _extract_fecha_from_filename(self, file_name: str) -> date | None:
         match = re.search(r"(\d{1,2})_(\d{1,2})_(\d{4})", file_name)

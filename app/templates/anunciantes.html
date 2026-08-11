@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}Anunciantes | Envío monitor{% endblock %}
+
+{% block content %}
+<section class="page-header page-header--split">
+  <div>
+    <p class="eyebrow">Base</p>
+    <h1 class="page-title titulos">Anunciantes</h1>
+    <p class="page-subtitle">Creación, consulta y edición de anunciantes.</p>
+  </div>
+</section>
+
+{% if message %}
+<section class="panel panel--tight process-message process-message--{{ status or 'ok' }}">
+  <strong>{{ message }}</strong>
+</section>
+{% endif %}
+
+<datalist id="alcances-list">
+  {% for alcance in alcances %}<option value="{{ alcance }}"></option>{% endfor %}
+</datalist>
+<datalist id="categorias-list">
+  {% for categoria in categorias %}<option value="{{ categoria }}"></option>{% endfor %}
+</datalist>
+
+<section class="panel panel--tight">
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Nuevo</p>
+      <h2 class="panel-title">Crear anunciante</h2>
+    </div>
+  </div>
+  <form method="post" action="/anunciantes/crear" class="control-create-form">
+    <label class="field">
+      <span class="field-label">Anunciante</span>
+      <input class="input" type="text" name="anunciante" required>
+    </label>
+    <label class="field">
+      <span class="field-label">Alcance</span>
+      <input class="input" list="alcances-list" name="alcance">
+    </label>
+    <label class="field">
+      <span class="field-label">Categoría</span>
+      <input class="input" list="categorias-list" name="categoria">
+    </label>
+    <div class="filter-actions"><button class="button" type="submit">Crear anunciante</button></div>
+  </form>
+</section>
+
+<section class="panel panel--tight">
+  <form method="get" action="/anunciantes" class="filter-grid">
+    <label class="field field--wide">
+      <span class="field-label">Anunciante</span>
+      <input class="input" type="text" name="q" value="{{ filters.q }}" placeholder="Buscar anunciante">
+    </label>
+    <label class="field">
+      <span class="field-label">Categoría</span>
+      <select class="input" name="categoria">
+        <option value="">Todas</option>
+        {% for item in categorias %}<option value="{{ item }}" {% if filters.categoria == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button class="button" type="submit">Filtrar</button>
+      <a class="button button-secondary" href="/anunciantes">Limpiar</a>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div><p class="eyebrow">Base anunciantes</p><h2 class="panel-title">Anunciantes</h2></div>
+    <span class="panel-meta">{{ anunciantes|length }} filas</span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table control-table">
+      <thead><tr><th>ID</th><th>Anunciante</th><th>Alcance</th><th>Categoría</th><th>Acción</th></tr></thead>
+      <tbody>
+        {% for item in anunciantes %}
+        <tr data-anunciante-row data-anunciante-id="{{ item.id_anunciante }}" data-anunciante-name="{{ item.anunciante or '' }}" data-anunciante-alcance="{{ item.alcance or '' }}" data-anunciante-categoria="{{ item.categoria or '' }}">
+          <td>{{ item.id_anunciante }}</td><td>{{ item.anunciante or "-" }}</td><td>{{ item.alcance or "-" }}</td><td>{{ item.categoria or "-" }}</td>
+          <td><button class="button button-small" type="button" data-edit-anunciante>Editar</button></td>
+        </tr>
+        {% else %}<tr><td colspan="5" class="empty-state">No hay anunciantes cargados.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel panel--tight inline-edit-panel" data-anunciante-editor hidden>
+  <div><p class="eyebrow">Editar</p><h2 class="panel-title">Anunciante seleccionado</h2></div>
+  <form method="post" action="/anunciantes/actualizar" class="inline-edit-grid">
+    <input type="hidden" name="id_anunciante" data-anunciante-editor-id>
+    <label class="field"><span class="field-label">Anunciante</span><input class="input input--compact" type="text" name="anunciante" data-anunciante-editor-name required></label>
+    <label class="field"><span class="field-label">Alcance</span><input class="input input--compact" list="alcances-list" name="alcance" data-anunciante-editor-alcance></label>
+    <label class="field"><span class="field-label">Categoría</span><input class="input input--compact" list="categorias-list" name="categoria" data-anunciante-editor-categoria></label>
+    <div class="filter-actions">
+      <button class="button button-small" type="submit">Guardar</button>
+      <button class="button button-secondary button-small" type="button" data-close-anunciante-editor>Cancelar</button>
+    </div>
+  </form>
+</section>
+
+<script>
+  const anuncianteEditor = document.querySelector("[data-anunciante-editor]");
+  document.querySelectorAll("[data-edit-anunciante]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const row = button.closest("[data-anunciante-row]");
+      if (!row || !anuncianteEditor) return;
+      anuncianteEditor.querySelector("[data-anunciante-editor-id]").value = row.dataset.anuncianteId || "";
+      anuncianteEditor.querySelector("[data-anunciante-editor-name]").value = row.dataset.anuncianteName || "";
+      anuncianteEditor.querySelector("[data-anunciante-editor-alcance]").value = row.dataset.anuncianteAlcance || "";
+      anuncianteEditor.querySelector("[data-anunciante-editor-categoria]").value = row.dataset.anuncianteCategoria || "";
+      anuncianteEditor.hidden = false;
+      anuncianteEditor.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  });
+  document.querySelector("[data-close-anunciante-editor]")?.addEventListener("click", () => {
+    if (anuncianteEditor) anuncianteEditor.hidden = true;
+  });
+</script>
+{% endblock %}

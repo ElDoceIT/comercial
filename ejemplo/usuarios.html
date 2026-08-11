@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Usuarios y roles{% endblock %}
+{% block content %}
+<div class="container">
+  <nav class="breadcrumb" aria-label="Migas de pan"><a href="/">Inicio</a><i class="bi bi-chevron-right"></i><span>Configuración</span><i class="bi bi-chevron-right"></i><strong>Usuarios y roles</strong></nav>
+  <header class="page-header"><div><span class="eyebrow">Configuración</span><h1>Usuarios y roles</h1><p>Administrá las personas habilitadas y sus perfiles de acceso.</p></div></header>
+
+  {% if guardado %}<div class="alert success"><i class="bi bi-check-circle-fill"></i> {{ guardado|capitalize }} correctamente.</div>{% endif %}
+  {% if error %}<div class="alert error"><i class="bi bi-exclamation-triangle-fill"></i> {{ error }}.</div>{% endif %}
+
+  <section class="card">
+    <div class="section-heading section-heading-pill"><h2>Usuarios del grupo de Active Directory</h2>{% if usuarios_ad is not none %}<span class="count-chip">{{ usuarios_ad|length }}</span>{% endif %}</div>
+    <p class="muted">Consulta de sólo lectura del grupo configurado en <code>AD_GROUP_NAME</code>. No modifica usuarios de la aplicación.</p>
+    <div class="form-actions">
+      <a class="ui-btn" href="/configuracion/usuarios?consultar_ad=true"><i class="bi bi-arrow-clockwise"></i> Consultar usuarios de AD</a>
+      <a class="ui-btn primary-btn" href="/configuracion/usuarios/sincronizar"><i class="bi bi-person-add"></i> Sincronizar con AD</a>
+    </div>
+    {% if error_ad %}<div class="alert error"><i class="bi bi-exclamation-triangle-fill"></i> {{ error_ad }}</div>{% endif %}
+    {% if usuarios_ad %}
+    <div class="table-wrap"><table class="ui-table">
+      <thead><tr><th>Nombre</th><th>Usuario de red</th><th>Correo</th></tr></thead>
+      <tbody>{% for usuario_ad in usuarios_ad %}<tr>
+        <td data-label="Nombre"><strong>{{ usuario_ad.display_name }}</strong></td>
+        <td data-label="Usuario de red">{{ usuario_ad.username }}</td>
+        <td data-label="Correo">{{ usuario_ad.email or '—' }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% elif usuarios_ad is not none and not error_ad %}<div class="empty-state"><i class="bi bi-people"></i><strong>El grupo no tiene usuarios</strong><span>No se encontraron miembros habilitados en el grupo configurado.</span></div>{% endif %}
+  </section>
+
+  <section class="card form-card" id="formulario-usuario">
+    <div class="section-heading section-heading-pill"><h2>{% if usuario_edicion %}Editar usuario #{{ usuario_edicion.id }}{% else %}Nuevo usuario{% endif %}</h2><span class="count-chip">{{ usuarios|length }}</span></div>
+    <form method="post" action="{% if usuario_edicion %}/configuracion/usuarios/{{ usuario_edicion.id }}{% else %}/configuracion/usuarios{% endif %}" class="user-form">
+      <label class="field"><span>Legajo</span><input name="legajo" maxlength="50" placeholder="Ej.: 1000" value="{{ usuario_edicion.legajo if usuario_edicion and usuario_edicion.legajo else '' }}"></label>
+      <label class="field"><span>Nombre *</span><input name="nombre" maxlength="100" required value="{{ usuario_edicion.nombre if usuario_edicion else '' }}"></label>
+      <label class="field"><span>Apellido *</span><input name="apellido" maxlength="100" required value="{{ usuario_edicion.apellido if usuario_edicion else '' }}"></label>
+      <label class="field"><span>Correo</span><input type="email" name="correo" maxlength="150" placeholder="nombre@canal12.com.ar" value="{{ usuario_edicion.correo if usuario_edicion and usuario_edicion.correo else '' }}"></label>
+      <label class="field"><span>Convenio *</span><select name="convenio" required><option value="" disabled {% if not usuario_edicion or not usuario_edicion.convenio %}selected{% endif %}>Seleccionar</option>{% for convenio in convenios %}<option value="{{ convenio }}" {% if usuario_edicion and usuario_edicion.convenio|upper == convenio %}selected{% endif %}>{{ convenio }}</option>{% endfor %}</select><small>Catálogo fijo de convenios habilitados.</small></label>
+      <label class="field"><span>Contratación *</span><select name="id_tipo_contratacion" required><option value="" disabled {% if not usuario_edicion or not usuario_edicion.id_tipo_contratacion %}selected{% endif %}>Seleccionar</option>{% for tipo in tipos_contratacion %}<option value="{{ tipo.id_tipo_contratacion }}" {% if usuario_edicion and usuario_edicion.id_tipo_contratacion == tipo.id_tipo_contratacion %}selected{% endif %}>{{ tipo.id_tipo_contratacion }} · {{ tipo.contratacion }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Usuario *</span><input name="username" maxlength="100" autocomplete="username" required value="{{ usuario_edicion.username if usuario_edicion else '' }}"></label>
+      <label class="field"><span>Contraseña {% if not usuario_edicion %}*{% endif %}</span><input type="password" name="password" minlength="8" autocomplete="new-password" {% if not usuario_edicion %}required{% endif %} placeholder="{% if usuario_edicion %}Dejar vacía para conservar{% else %}Mínimo 8 caracteres{% endif %}"></label>
+      <label class="field"><span>Origen *</span><select name="origen" required><option value="LOCAL" {% if not usuario_edicion or usuario_edicion.origen == 'LOCAL' %}selected{% endif %}>Local</option><option value="AD" {% if usuario_edicion and usuario_edicion.origen == 'AD' %}selected{% endif %}>AD</option><option value="LDAP" {% if usuario_edicion and usuario_edicion.origen == 'LDAP' %}selected{% endif %}>LDAP (anterior)</option><option value="IMPORTADO" {% if usuario_edicion and usuario_edicion.origen == 'IMPORTADO' %}selected{% endif %}>Importado</option></select></label>
+      {% if not usuario_edicion %}
+      <label class="field"><span>Rol inicial *</span><select name="rol" required><option value="" selected disabled>Seleccionar rol</option>{% for rol in roles_disponibles %}<option value="{{ rol }}">{{ rol|capitalize }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Perfil inicial *</span><select name="perfil" required>{% for perfil in perfiles_disponibles %}<option value="{{ perfil }}">{{ perfil|capitalize }}</option>{% endfor %}</select></label>
+      {% endif %}
+      <label class="check-field user-status"><input type="checkbox" name="status" {% if not usuario_edicion or usuario_edicion.status %}checked{% endif %}><span><strong>Usuario activo</strong><small>Puede acceder al sistema.</small></span></label>
+      <label class="field user-observations"><span>Observaciones</span><textarea name="observaciones" rows="3" placeholder="Información adicional del usuario">{{ usuario_edicion.observaciones if usuario_edicion and usuario_edicion.observaciones else '' }}</textarea></label>
+      <div class="form-actions user-actions">{% if usuario_edicion %}<a class="ui-btn" href="/configuracion/usuarios#formulario-usuario">Cancelar</a>{% endif %}<button class="ui-btn primary-btn" type="submit"><i class="bi bi-person-check"></i> {% if usuario_edicion %}Guardar usuario{% else %}Crear usuario{% endif %}</button></div>
+    </form>
+  </section>
+
+  {% if usuario_edicion %}
+  <section class="card form-card" id="asignaciones">
+    <div class="section-heading section-heading-pill"><h2>Roles y perfiles de {{ usuario_edicion.nombre }}</h2><span class="count-chip">{{ usuario_edicion.roles|length }}</span></div>
+    <form method="post" action="/configuracion/usuarios/{{ usuario_edicion.id }}/roles" class="assignment-form">
+      <label class="field"><span>Rol *</span><select name="rol" required><option value="" selected disabled>Seleccionar rol</option>{% for rol in roles_disponibles %}<option value="{{ rol }}">{{ rol|capitalize }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Perfil *</span><select name="perfil" required>{% for perfil in perfiles_disponibles %}<option value="{{ perfil }}">{{ perfil|capitalize }}</option>{% endfor %}</select></label>
+      <button class="ui-btn primary-btn" type="submit"><i class="bi bi-plus-lg"></i> Agregar asignación</button>
+    </form>
+    {% if usuario_edicion.roles %}<div class="role-list assignment-list">{% for asignacion in usuario_edicion.roles %}<div class="role-item"><span class="role-icon"><i class="bi bi-shield-check"></i></span><span><strong>{{ asignacion.rol }}</strong><small>{{ asignacion.perfil|capitalize }}</small></span><form method="post" action="/configuracion/usuarios/{{ usuario_edicion.id }}/roles/{{ asignacion.id_rol }}/eliminar" onsubmit="return confirm('¿Eliminar esta asignación?');"><button class="ui-btn icon-btn danger-btn" type="submit" aria-label="Eliminar {{ asignacion.rol }} / {{ asignacion.perfil }}" title="Eliminar"><i class="bi bi-trash"></i></button></form></div>{% endfor %}</div>{% else %}<div class="empty-state"><i class="bi bi-shield-exclamation"></i><strong>Sin asignaciones</strong><span>Agregá al menos un rol y perfil para que el usuario pueda elegir un contexto de trabajo.</span></div>{% endif %}
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <div class="section-heading section-heading-pill"><h2>Usuarios registrados</h2><span class="count-chip">{{ usuarios|length }}</span></div>
+    {% if usuarios %}<div class="table-wrap"><table class="ui-table">
+      <thead><tr><th>Persona</th><th>Legajo</th><th>Usuario</th><th>Convenio</th><th>Contratación</th><th>Asignaciones</th><th>Estado</th><th class="actions-column">Acciones</th></tr></thead>
+      <tbody>{% for usuario in usuarios %}<tr>
+        <td data-label="Persona"><span class="person-cell"><span class="avatar">{{ usuario.nombre[0] }}{{ usuario.apellido[0] }}</span><strong>{{ usuario.apellido }}, {{ usuario.nombre }}</strong></span></td>
+        <td data-label="Legajo">{{ usuario.legajo or '—' }}</td><td data-label="Usuario"><strong>{{ usuario.username }}</strong><span class="cell-help">{{ usuario.correo or 'Sin correo' }} · {{ usuario.origen }}</span></td><td data-label="Convenio">{{ usuario.convenio or '—' }}</td><td data-label="Contratación">{{ usuario.tipo_contratacion.contratacion if usuario.tipo_contratacion else '—' }}</td><td data-label="Asignaciones">{% for asignacion in usuario.roles %}<span class="type-chip">{{ asignacion.rol }} · {{ asignacion.perfil|capitalize }}</span>{% else %}<span class="muted">Sin asignaciones</span>{% endfor %}</td>
+        <td data-label="Estado">{% if usuario.status %}<span class="status-chip success-chip"><i class="bi bi-check-circle"></i> Activo</span>{% else %}<span class="status-chip neutral-chip"><i class="bi bi-pause-circle"></i> Inactivo</span>{% endif %}</td>
+        <td data-label="Acciones" class="actions-column"><a class="ui-btn icon-btn edit-btn" href="/configuracion/usuarios?editar_usuario={{ usuario.id }}#formulario-usuario" aria-label="Editar usuario {{ usuario.username }}" title="Editar usuario"><i class="bi bi-pencil"></i></a></td>
+      </tr>{% endfor %}</tbody>
+    </table></div>{% else %}<div class="empty-state"><i class="bi bi-people"></i><strong>No hay usuarios registrados</strong><span>Completá el formulario para crear el primero.</span></div>{% endif %}
+  </section>
+</div>
+{% endblock %}

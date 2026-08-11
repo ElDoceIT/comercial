@@ -16,6 +16,10 @@ SQLAlchemy==2.0.44
 PyMySQL==1.1.2
 alembic==1.16.5
 Jinja2==3.1.6
+python-multipart==0.0.22
+ldap3==2.9.1
+itsdangerous==2.2.0
+bcrypt==4.3.0
 
 # Configuracion por variables de entorno
 pydantic-settings==2.13.1

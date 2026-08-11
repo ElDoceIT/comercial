@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Sincronizar AD | Envío monitor{% endblock %}
+{% block content %}
+<section class="page-header"><div><p class="eyebrow">Usuarios</p><h1 class="page-title">Sincronizar Active Directory</h1><p class="page-subtitle">Revisá los miembros del grupo antes de incorporarlos.</p></div><a class="button button-secondary" href="/configuracion/usuarios">Volver</a></section>
+{% if error %}<section class="panel panel--tight process-message process-message--error"><strong>{{ error }}</strong></section>{% endif %}
+
+<section class="panel"><div class="panel-header"><h2 class="panel-title">Nuevos usuarios</h2><span class="panel-meta">{{ new_users|length }}</span></div>
+  {% for item in new_users %}<form method="post" action="/configuracion/usuarios/sincronizar/incorporar" class="filter-grid">
+    <input type="hidden" name="username" value="{{ item.username }}">
+    <label class="field"><span class="field-label">Usuario</span><input class="input" value="{{ item.username }}" disabled></label>
+    <label class="field"><span class="field-label">Nombre</span><input class="input" name="nombre" required value="{{ item.first_name }}"></label>
+    <label class="field"><span class="field-label">Apellido</span><input class="input" name="apellido" required value="{{ item.last_name }}"></label>
+    <label class="field"><span class="field-label">Correo</span><input class="input" name="correo" type="email" value="{{ item.email or '' }}"></label>
+    <label class="field"><span class="field-label">Rol</span><select class="input" name="rol"><option>USUARIO</option><option>ADMIN</option></select></label>
+    <label class="field"><span class="field-label">Perfil</span><select class="input" name="perfil"><option>OPERADOR</option><option>ADMIN</option></select></label>
+    <div class="filter-actions"><button class="button" type="submit">Incorporar usuario</button></div>
+  </form>{% else %}<p class="empty-state">No hay usuarios nuevos.</p>{% endfor %}
+</section>
+
+{% if reactivable_users %}<section class="panel"><div class="panel-header"><h2 class="panel-title">Para reactivar</h2><span class="panel-meta">{{ reactivable_users|length }}</span></div>{% for user in reactivable_users %}<div class="panel-actions"><span><strong>{{ user.apellido }}, {{ user.nombre }}</strong> · {{ user.username }}</span><form method="post" action="/configuracion/usuarios/sincronizar/{{ user.id }}/reactivar"><button class="button button-small" type="submit">Reactivar</button></form></div>{% endfor %}</section>{% endif %}
+
+<section class="panel"><div class="panel-header"><h2 class="panel-title">Ya incorporados</h2><span class="panel-meta">{{ existing_users|length }}</span></div>{% for user in existing_users %}<p><strong>{{ user.apellido }}, {{ user.nombre }}</strong> · {{ user.username }}</p>{% else %}<p class="empty-state">No hay coincidencias.</p>{% endfor %}</section>
+
+{% if inactive_users %}<section class="panel"><div class="panel-header"><h2 class="panel-title">Ausentes del grupo AD</h2><span class="panel-meta">{{ inactive_users|length }}</span></div><p class="process-message process-message--error">Continúan activos localmente, pero ya no aparecen en el grupo.</p>{% for user in inactive_users %}<p><strong>{{ user.apellido }}, {{ user.nombre }}</strong> · {{ user.username }}</p>{% endfor %}</section>{% endif %}
+{% endblock %}

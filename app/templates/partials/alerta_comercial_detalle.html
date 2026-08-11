@@ -1,0 +1,61 @@
+<section class="alert-detail-chart">
+  <h3>Evolución diaria · {{ canal }} vs. Canal 12</h3>
+  {% if line_chart.series %}
+  <svg class="line-chart" viewBox="0 0 {{ line_chart.width }} {{ line_chart.height }}" role="img" aria-label="Comparación diaria entre {{ canal }} y Canal 12">
+    {% for tick in line_chart.y_labels %}
+    <line x1="{{ line_chart.plot.x }}" x2="{{ line_chart.plot.x + line_chart.plot.width }}" y1="{{ tick.y }}" y2="{{ tick.y }}" class="chart-grid-line"></line>
+    <text x="48" y="{{ tick.y + 4 }}" text-anchor="end" class="chart-axis-label">{{ tick.value }}</text>
+    {% endfor %}
+    {% for item in line_chart.x_labels %}
+    <text x="{{ item.x }}" y="{{ line_chart.height - 16 }}" text-anchor="middle" class="chart-axis-label">{{ item.label }}</text>
+    {% endfor %}
+    {% for serie in line_chart.series %}
+    <polyline points="{{ serie.polyline }}" fill="none" stroke="{{ serie.color }}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+    {% for point in serie.points %}<circle cx="{{ point.x }}" cy="{{ point.y }}" r="3.5" fill="{{ serie.color }}"></circle>{% endfor %}
+    {% endfor %}
+  </svg>
+  <div class="chart-legend">
+    {% for serie in line_chart.series %}<span><i style="background: {{ serie.color }}"></i>{{ serie.channel }}</span>{% endfor %}
+  </div>
+  {% else %}
+  <p class="empty-state">No hay datos diarios para graficar.</p>
+  {% endif %}
+</section>
+
+<section class="alert-detail-grid">
+  <div class="alert-detail-dates">
+    <h3>Duración por fecha · {{ canal }}</h3>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Fecha</th><th>Duración</th></tr></thead>
+        <tbody>
+          {% for row in daily_rows %}
+          <tr><td>{{ row.fecha.strftime("%d/%m/%Y") }}</td><td>{{ "{:,}".format(row.duracion_total or 0).replace(",", ".") }} s</td></tr>
+          {% else %}
+          <tr><td colspan="2" class="empty-state">No hay duraciones diarias para mostrar.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="alert-detail-products">
+    <h3>Productos y temas</h3>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Producto</th><th>Tema</th><th>Segundos</th></tr></thead>
+        <tbody>
+          {% for row in product_rows %}
+          <tr>
+            <td>{{ row.producto or "Sin producto" }}</td>
+            <td>{{ row.tema or "Sin tema" }}</td>
+            <td>{{ "{:,}".format(row.duracion_total or 0).replace(",", ".") }} s</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="empty-state">No hay productos o temas para mostrar.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>

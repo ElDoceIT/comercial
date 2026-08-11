@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 
-{% block title %}Archivos | Monitor Pautas{% endblock %}
+{% block title %}Envíos | Envío monitor{% endblock %}
 
 {% block content %}
 <section class="page-header">
   <div>
-    <p class="eyebrow">Resumen</p>
-    <h1 class="page-title titulos">Archivos de ingesta</h1>
-    <p class="page-subtitle">Vista rápida de la carga y seguimiento de archivos procesados.</p>
+    <p class="eyebrow">Control</p>
+    <h1 class="page-title titulos">Envíos</h1>
+    <p class="page-subtitle">Carga y seguimiento de los archivos procesados desde Google Drive.</p>
   </div>
   <form method="post" action="/run-drive-process" class="home-process-form">
-    <button class="button" type="submit">Correr proceso Drive</button>
+    <button class="button" type="submit"><i class="bi bi-cloud-arrow-down"></i> Procesar Drive</button>
   </form>
 </section>
 
@@ -23,7 +23,7 @@
 
 <section class="stats-grid">
   <article class="stat-card">
-    <span class="stat-label">Archivos ingesta</span>
+    <span class="stat-label">Archivos de ingesta</span>
     <strong class="stat-value">{{ archivos_count }}</strong>
   </article>
   <article class="stat-card">
@@ -40,31 +40,38 @@
   </article>
   <article class="stat-card">
     <span class="stat-label">Última fecha cargada</span>
-    <strong class="stat-value stat-value--small">
-      {{ ultima_fecha_cargada.strftime("%d/%m/%Y") if ultima_fecha_cargada else "Sin datos" }}
-    </strong>
+    <strong class="stat-value stat-value--small">{{ ultima_fecha_cargada.strftime("%d/%m/%Y") if ultima_fecha_cargada else "Sin datos" }}</strong>
   </article>
 </section>
 
 <section class="panel">
   <div class="panel-header">
-    <div>
-      <p class="eyebrow">Trazabilidad</p>
-      <h2 class="panel-title">Archivos procesados</h2>
-    </div>
+    <div><p class="eyebrow">Últimos 30 días completos</p><h2 class="panel-title">Canales faltantes</h2></div>
+    <span class="panel-meta">{{ missing_channels|length }}</span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>Fecha</th><th>Canal faltante</th></tr></thead>
+      <tbody>
+        {% for item in missing_channels %}
+        <tr><td>{{ item.fecha.strftime("%d/%m/%Y") }}</td><td>{{ item.canal }}</td></tr>
+        {% else %}
+        <tr><td colspan="2" class="empty-state">No se detectaron canales faltantes.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-header">
+    <div><p class="eyebrow">Trazabilidad</p><h2 class="panel-title">Archivos procesados</h2></div>
     <span class="panel-meta">{{ archivos|length }} filas</span>
   </div>
   <div class="table-wrap">
     <table class="data-table">
       <thead>
-        <tr>
-          <th>Nombre archivo</th>
-          <th>Estado</th>
-          <th>Inicio</th>
-          <th>Fin</th>
-          <th>Filas procesadas</th>
-          <th>Error detalle</th>
-        </tr>
+        <tr><th>Nombre archivo</th><th>Estado</th><th>Inicio</th><th>Fin</th><th>Filas procesadas</th><th>Error detalle</th></tr>
       </thead>
       <tbody>
         {% for archivo in archivos %}
@@ -77,9 +84,7 @@
           <td class="error-cell">{{ archivo.error_detalle or "-" }}</td>
         </tr>
         {% else %}
-        <tr>
-          <td colspan="6" class="empty-state">No hay registros en archivos_ingesta.</td>
-        </tr>
+        <tr><td colspan="6" class="empty-state">No hay registros de envíos procesados.</td></tr>
         {% endfor %}
       </tbody>
     </table>

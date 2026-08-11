@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Sincronizar usuarios de AD{% endblock %}
+{% block content %}
+<div class="container">
+  <nav class="breadcrumb" aria-label="Migas de pan"><a href="/">Inicio</a><i class="bi bi-chevron-right"></i><a href="/configuracion/usuarios">Usuarios y roles</a><i class="bi bi-chevron-right"></i><strong>Sincronizar AD</strong></nav>
+  <header class="page-header"><div><span class="eyebrow">Configuración</span><h1>Sincronizar usuarios de AD</h1><p>Revisá los cambios antes de aplicarlos. Los usuarios existentes no se sobrescriben.</p></div></header>
+  {% if guardado %}<div class="alert success"><i class="bi bi-check-circle-fill"></i> {{ guardado|replace('+', ' ')|capitalize }} correctamente.</div>{% endif %}
+  {% if error %}<div class="alert error"><i class="bi bi-exclamation-triangle-fill"></i> {{ error }}.</div>{% endif %}
+
+  <section class="card">
+    <div class="section-heading section-heading-pill"><h2>Nuevos usuarios</h2><span class="count-chip">{{ new_users|length }}</span></div>
+    {% for ad_user in new_users %}
+    <form method="post" action="/configuracion/usuarios/sincronizar/incorporar" class="user-form">
+      <input type="hidden" name="username" value="{{ ad_user.username }}">
+      <label class="field"><span>Usuario</span><input value="{{ ad_user.username }}" disabled></label>
+      <label class="field"><span>Nombre *</span><input name="nombre" required value="{{ ad_user.first_name }}"></label>
+      <label class="field"><span>Apellido *</span><input name="apellido" required value="{{ ad_user.last_name }}"></label>
+      <label class="field"><span>Correo</span><input type="email" name="correo" value="{{ ad_user.email or '' }}"></label>
+      <label class="field"><span>Legajo</span><input name="legajo" maxlength="50"></label>
+      <label class="field"><span>Convenio *</span><select name="convenio" required><option value="" selected disabled>Seleccionar</option>{% for item in convenios %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Contratación *</span><select name="id_tipo_contratacion" required><option value="" selected disabled>Seleccionar</option>{% for item in tipos_contratacion %}<option value="{{ item.id_tipo_contratacion }}">{{ item.contratacion }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Rol *</span><select name="rol" required><option value="" selected disabled>Seleccionar</option>{% for item in roles_disponibles %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Perfil *</span><select name="perfil" required>{% for item in perfiles_disponibles %}<option value="{{ item }}">{{ item }}</option>{% endfor %}</select></label>
+      <div class="form-actions"><button class="ui-btn primary-btn" type="submit"><i class="bi bi-person-check"></i> Incorporar usuario</button></div>
+    </form>
+    {% else %}<div class="empty-state"><i class="bi bi-check-circle"></i><strong>No hay usuarios nuevos</strong><span>Todos los miembros del grupo ya están registrados.</span></div>{% endfor %}
+  </section>
+
+  {% if reactivable_users %}<section class="card"><div class="section-heading section-heading-pill"><h2>Para reactivar</h2><span class="count-chip">{{ reactivable_users|length }}</span></div>{% for user in reactivable_users %}<div class="role-item"><span><strong>{{ user.apellido }}, {{ user.nombre }}</strong><small>{{ user.username }}</small></span><form method="post" action="/configuracion/usuarios/sincronizar/{{ user.id }}/reactivar"><button class="ui-btn" type="submit">Reactivar</button></form></div>{% endfor %}</section>{% endif %}
+
+  <section class="card"><div class="section-heading section-heading-pill"><h2>Ya incorporados</h2><span class="count-chip">{{ existing_users|length }}</span></div>{% for user in existing_users %}<div class="role-item"><span><strong>{{ user.apellido }}, {{ user.nombre }}</strong><small>{{ user.username }} · Sin cambios</small></span></div>{% else %}<p class="muted">No hay coincidencias.</p>{% endfor %}</section>
+
+  {% if inactive_users %}<section class="card"><div class="section-heading section-heading-pill"><h2>Ausentes del grupo</h2><span class="count-chip">{{ inactive_users|length }}</span></div><div class="alert error"><i class="bi bi-exclamation-triangle-fill"></i> Estos usuarios LDAP están activos localmente pero ya no aparecen en el grupo.</div>{% for user in inactive_users %}<div class="role-item"><span><strong>{{ user.apellido }}, {{ user.nombre }}</strong><small>{{ user.username }}</small></span></div>{% endfor %}<form method="post" action="/configuracion/usuarios/sincronizar/desactivar-ausentes" onsubmit="return confirm('¿Desactivar todos los usuarios LDAP ausentes del grupo?');"><button class="ui-btn danger-btn" type="submit"><i class="bi bi-person-dash"></i> Confirmar desactivación</button></form></section>{% endif %}
+</div>
+{% endblock %}

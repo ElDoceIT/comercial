@@ -16,7 +16,7 @@ class Cronograma(Base):
     cod_prod: Mapped[str | None] = mapped_column(String(50), nullable=True)
     producto: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tema: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    duracion: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    duracion: Mapped[int | None] = mapped_column(Integer, nullable=True)
     t_compra: Mapped[str | None] = mapped_column(String(50), nullable=True)
     t_material: Mapped[str | None] = mapped_column(String(50), nullable=True)
     columna_extra: Mapped[str | None] = mapped_column(String(255), nullable=True)

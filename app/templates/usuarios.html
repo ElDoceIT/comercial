@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Usuarios | Envío monitor{% endblock %}
+{% block content %}
+<section class="page-header"><div><p class="eyebrow">Control</p><h1 class="page-title">Usuarios</h1><p class="page-subtitle">Administración de accesos locales y de Active Directory.</p></div></section>
+
+{% if guardado %}<section class="panel panel--tight process-message"><strong>{{ guardado }}</strong></section>{% endif %}
+{% if error %}<section class="panel panel--tight process-message process-message--error"><strong>{{ error }}</strong></section>{% endif %}
+
+<section class="panel">
+  <div class="panel-header"><h2 class="panel-title">Active Directory</h2></div>
+  <p class="page-subtitle">Consulta de solo lectura del grupo configurado.</p>
+  <div class="filter-actions">
+    <a class="button button-secondary" href="/configuracion/usuarios?consultar_ad=true"><i class="bi bi-arrow-clockwise"></i> Consultar AD</a>
+    <a class="button" href="/configuracion/usuarios/sincronizar"><i class="bi bi-person-add"></i> Sincronizar AD</a>
+  </div>
+  {% if error_ad %}<div class="login-alert">{{ error_ad }}</div>{% endif %}
+  {% if usuarios_ad is not none %}
+  <div class="table-wrap"><table class="data-table"><thead><tr><th>Nombre</th><th>Usuario</th><th>Correo</th></tr></thead><tbody>
+    {% for item in usuarios_ad %}<tr><td>{{ item.display_name }}</td><td>{{ item.username }}</td><td>{{ item.email or "—" }}</td></tr>
+    {% else %}<tr><td colspan="3" class="empty-state">No se encontraron usuarios.</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+</section>
+
+<section class="panel" id="formulario-usuario">
+  <div class="panel-header"><h2 class="panel-title">{% if usuario_edicion %}Editar usuario #{{ usuario_edicion.id }}{% else %}Nuevo usuario{% endif %}</h2></div>
+  <form method="post" action="{% if usuario_edicion %}/configuracion/usuarios/{{ usuario_edicion.id }}{% else %}/configuracion/usuarios{% endif %}" class="filter-grid">
+    <label class="field"><span class="field-label">Nombre *</span><input class="input" name="nombre" required maxlength="100" value="{{ usuario_edicion.nombre if usuario_edicion else '' }}"></label>
+    <label class="field"><span class="field-label">Apellido *</span><input class="input" name="apellido" required maxlength="100" value="{{ usuario_edicion.apellido if usuario_edicion else '' }}"></label>
+    <label class="field"><span class="field-label">Correo</span><input class="input" type="email" name="correo" maxlength="150" value="{{ (usuario_edicion.correo or '') if usuario_edicion else '' }}"></label>
+    <label class="field"><span class="field-label">Usuario *</span><input class="input" name="username" required maxlength="100" autocomplete="username" value="{{ usuario_edicion.username if usuario_edicion else '' }}"></label>
+    <label class="field"><span class="field-label">Contraseña {% if not usuario_edicion %}(mín. 8) *{% endif %}</span><input class="input" type="password" name="password" minlength="8" autocomplete="new-password" {% if not usuario_edicion %}required{% endif %} placeholder="{% if usuario_edicion %}Vacía para conservar{% endif %}"></label>
+    <label class="field"><span class="field-label">Origen</span><select class="input" name="origen"><option value="LOCAL" {% if not usuario_edicion or usuario_edicion.origen == 'LOCAL' %}selected{% endif %}>Local</option><option value="AD" {% if usuario_edicion and usuario_edicion.origen == 'AD' %}selected{% endif %}>AD</option></select></label>
+    <label class="field"><span class="field-label">Rol</span><select class="input" name="rol">{% for item in roles %}<option value="{{ item }}" {% if usuario_edicion and usuario_edicion.rol == item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></label>
+    <label class="field"><span class="field-label">Perfil</span><select class="input" name="perfil">{% for item in perfiles %}<option value="{{ item }}" {% if usuario_edicion and usuario_edicion.perfil == item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></label>
+    <label class="field"><span class="field-label">Estado</span><span><input type="checkbox" name="status" {% if not usuario_edicion or usuario_edicion.status %}checked{% endif %}> Usuario activo</span></label>
+    <div class="filter-actions">{% if usuario_edicion %}<a class="button button-secondary" href="/configuracion/usuarios#formulario-usuario">Cancelar</a>{% endif %}<button class="button" type="submit">{% if usuario_edicion %}Guardar{% else %}Crear usuario{% endif %}</button></div>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-header"><h2 class="panel-title">Usuarios registrados</h2><span class="panel-meta">{{ usuarios|length }}</span></div>
+  <div class="table-wrap"><table class="data-table"><thead><tr><th>Persona</th><th>Usuario</th><th>Origen</th><th>Rol</th><th>Perfil</th><th>Estado</th><th>Acción</th></tr></thead><tbody>
+    {% for usuario in usuarios %}<tr><td><strong>{{ usuario.apellido }}, {{ usuario.nombre }}</strong><br><span class="muted-cell">{{ usuario.correo or "Sin correo" }}</span></td><td>{{ usuario.username }}</td><td>{{ usuario.origen }}</td><td>{{ usuario.rol or "—" }}</td><td>{{ usuario.perfil or "—" }}</td><td>{% if usuario.status %}<span class="badge badge-procesado">Activo</span>{% else %}<span class="badge">Inactivo</span>{% endif %}</td><td><a class="button button-small" href="/configuracion/usuarios?editar_usuario={{ usuario.id }}#formulario-usuario">Editar</a></td></tr>
+    {% else %}<tr><td colspan="7" class="empty-state">No hay usuarios registrados.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

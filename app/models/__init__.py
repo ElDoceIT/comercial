@@ -4,6 +4,7 @@ from app.models.cronogramas import Cronograma
 from app.models.maestro_productos_clientes import MaestroProductosClientes
 from app.models.maestro_productos import MaestroProducto
 from app.models.productos_temas import ProductoTema
+from app.models.usuarios import Usuario
 
 __all__ = [
     "ArchivoIngesta",
@@ -12,4 +13,5 @@ __all__ = [
     "MaestroProducto",
     "MaestroProductosClientes",
     "ProductoTema",
+    "Usuario",
 ]

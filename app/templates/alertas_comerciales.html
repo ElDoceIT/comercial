@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block title %}Alertas comerciales | Envío Monitor{% endblock %}
+
+{% macro category_filter(options, selected_values) %}
+<div class="field multi-filter-field alert-category-field" data-multi-dropdown>
+  <span class="field-label">Categorías</span>
+  <button class="input multi-dropdown-button" type="button" data-dropdown-toggle aria-expanded="false">
+    <span data-dropdown-label>Categorías</span><span aria-hidden="true">▾</span>
+  </button>
+  <div class="multi-dropdown-menu" data-dropdown-menu hidden>
+    <button class="button button-secondary select-all-button" type="button" data-toggle-all>Seleccionar todas</button>
+    <input class="input input--compact multi-dropdown-search" type="search" placeholder="Buscar">
+    <div class="multi-dropdown-options">
+      {% for item in options %}
+      <label class="multi-dropdown-option">
+        <input type="checkbox" name="categoria" value="{{ item }}" {% if item in selected_values %}checked{% endif %}>
+        <span>{{ item }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% block content %}
+<section class="dashboard-shell commercial-alerts">
+  <header class="dashboard-header">
+    <div class="dashboard-title-block">
+      <p class="eyebrow">Comparación individual por canal</p>
+      <h1 class="dashboard-title">Alertas comerciales</h1>
+      <p class="page-subtitle">Anunciantes con más segundos en un canal competidor que en Canal 12.</p>
+    </div>
+  </header>
+
+  <section class="dashboard-filters panel panel--tight">
+    <form method="get" action="/alertas-comerciales" class="filter-grid alert-filter-grid">
+      <div class="quick-date-row">
+        <a class="quick-date-button{% if filters.fecha_desde == quick_date_ranges.ultimos_15.fecha_desde and filters.fecha_hasta == quick_date_ranges.ultimos_15.fecha_hasta %} is-active{% endif %}" href="/alertas-comerciales?fecha_desde={{ quick_date_ranges.ultimos_15.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimos_15.fecha_hasta }}">Últimos 15 días</a>
+        <a class="quick-date-button{% if filters.fecha_desde == quick_date_ranges.ultimo_mes.fecha_desde and filters.fecha_hasta == quick_date_ranges.ultimo_mes.fecha_hasta %} is-active{% endif %}" href="/alertas-comerciales?fecha_desde={{ quick_date_ranges.ultimo_mes.fecha_desde }}&fecha_hasta={{ quick_date_ranges.ultimo_mes.fecha_hasta }}">Último mes</a>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Fecha desde</span>
+        <input class="input" type="date" name="fecha_desde" value="{{ filters.fecha_desde }}">
+      </label>
+      <label class="field">
+        <span class="field-label">Fecha hasta</span>
+        <input class="input" type="date" name="fecha_hasta" value="{{ filters.fecha_hasta }}">
+      </label>
+      {{ category_filter(category_options, filters.categorias) }}
+      <div class="filter-actions">
+        <button class="button" type="submit">Analizar</button>
+        <button class="button button-secondary" type="submit" formaction="/alertas-comerciales/exportar">Exportar XLSX</button>
+        <button class="button button-secondary" type="button" data-collapse-alerts>Colapsar todas</button>
+        <a class="button button-secondary" href="/alertas-comerciales">Restablecer</a>
+      </div>
+    </form>
+  </section>
+
+  <section class="alert-summary-grid">
+    <article class="stat-card alert-summary-card">
+      <span>Anunciantes en alerta</span>
+      <strong>{{ advertiser_count }}</strong>
+    </article>
+    <article class="stat-card alert-summary-card alert-summary-card--critical">
+      <span>Casos críticos</span>
+      <strong>{{ critical_count }}</strong>
+    </article>
+    <article class="stat-card alert-summary-card">
+      <span>Comparaciones detectadas</span>
+      <strong>{{ alert_rows|length }}</strong>
+    </article>
+  </section>
+
+  <article class="panel">
+    <div class="panel-header">
+      <h2 class="panel-title">Canales que superan individualmente a Canal 12</h2>
+      <span class="panel-meta">{{ alert_rows|length }}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table alert-table">
+        <thead>
+          <tr>
+            <th>Estado</th>
+            <th>Anunciante</th>
+            <th>Canal 12</th>
+            <th>Canal competidor</th>
+            <th>Segundos competidor</th>
+            <th>Diferencia</th>
+            <th>Brecha</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in alert_rows %}
+          <tr class="alert-row" tabindex="0" role="button" aria-expanded="false" data-alert-row data-anunciante="{{ row.anunciante }}" data-canal="{{ row.competitor }}">
+            <td><span class="alert-badge {% if row.critical %}is-critical{% else %}is-warning{% endif %}">{% if row.critical %}Crítica{% else %}Atención{% endif %}</span></td>
+            <td><strong>{{ row.anunciante }}</strong></td>
+            <td>{{ "{:,}".format(row.canal_12_seconds).replace(",", ".") }} s</td>
+            <td>{{ row.competitor }}</td>
+            <td>{{ "{:,}".format(row.competitor_seconds).replace(",", ".") }} s</td>
+            <td class="alert-difference">+{{ "{:,}".format(row.difference).replace(",", ".") }} s</td>
+            <td>{% if row.difference_percentage is not none %}+{{ "%.1f"|format(row.difference_percentage) }}%{% else %}Sin pauta en C12{% endif %}</td>
+          </tr>
+          <tr class="alert-detail-row" data-alert-detail hidden>
+            <td colspan="7"><div class="alert-detail-content"></div></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="empty-state">No hay anunciantes con canales competidores por encima de Canal 12 para este período.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+</section>
+
+<script>
+  const alertDropdown = document.querySelector("[data-multi-dropdown]");
+  if (alertDropdown) {
+    const toggle = alertDropdown.querySelector("[data-dropdown-toggle]");
+    const menu = alertDropdown.querySelector("[data-dropdown-menu]");
+    const label = alertDropdown.querySelector("[data-dropdown-label]");
+    const search = alertDropdown.querySelector(".multi-dropdown-search");
+    const allButton = alertDropdown.querySelector("[data-toggle-all]");
+    const checks = Array.from(alertDropdown.querySelectorAll('input[type="checkbox"]'));
+
+    const updateState = () => {
+      const selected = checks.filter((check) => check.checked);
+      label.textContent = selected.length === 0 ? "Ninguna" : selected.length === 1 ? selected[0].value : `${selected.length} seleccionadas`;
+      allButton.textContent = selected.length === checks.length ? "Deseleccionar todas" : "Seleccionar todas";
+    };
+    const filterOptions = () => {
+      const query = search.value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      alertDropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => {
+        const text = option.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        option.hidden = query && !text.includes(query);
+      });
+    };
+
+    updateState();
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
+      toggle.setAttribute("aria-expanded", String(!menu.hidden));
+      if (!menu.hidden) search.focus();
+    });
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    checks.forEach((check) => check.addEventListener("change", updateState));
+    search.addEventListener("input", filterOptions);
+    allButton.addEventListener("click", () => {
+      const select = !checks.every((check) => check.checked);
+      checks.forEach((check) => { check.checked = select; });
+      updateState();
+    });
+    document.addEventListener("click", () => {
+      menu.hidden = true;
+      toggle.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  document.querySelectorAll("[data-alert-row]").forEach((row) => {
+    const openDetail = async () => {
+      const detailRow = row.nextElementSibling;
+      const content = detailRow?.querySelector(".alert-detail-content");
+      if (!detailRow || !content) return;
+
+      if (!detailRow.hidden) {
+        detailRow.hidden = true;
+        row.setAttribute("aria-expanded", "false");
+        return;
+      }
+
+      detailRow.hidden = false;
+      row.setAttribute("aria-expanded", "true");
+      if (detailRow.dataset.loaded === "true") return;
+      content.innerHTML = '<p class="empty-state">Cargando detalle…</p>';
+
+      const params = new URLSearchParams(window.location.search);
+      const dateFrom = document.querySelector('input[name="fecha_desde"]')?.value;
+      const dateTo = document.querySelector('input[name="fecha_hasta"]')?.value;
+      if (dateFrom) params.set("fecha_desde", dateFrom);
+      if (dateTo) params.set("fecha_hasta", dateTo);
+      params.set("anunciante", row.dataset.anunciante || "");
+      params.set("canal", row.dataset.canal || "");
+      try {
+        const response = await fetch(`/alertas-comerciales/detalle?${params.toString()}`);
+        if (!response.ok) throw new Error("No se pudo cargar el detalle");
+        content.innerHTML = await response.text();
+        detailRow.dataset.loaded = "true";
+      } catch (error) {
+        content.innerHTML = '<p class="empty-state">No se pudo cargar el detalle.</p>';
+      }
+    };
+    row.addEventListener("click", openDetail);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDetail();
+      }
+    });
+  });
+
+  document.querySelector("[data-collapse-alerts]")?.addEventListener("click", () => {
+    document.querySelectorAll("[data-alert-detail]").forEach((detailRow) => {
+      detailRow.hidden = true;
+    });
+    document.querySelectorAll("[data-alert-row]").forEach((row) => {
+      row.setAttribute("aria-expanded", "false");
+    });
+  });
+</script>
+{% endblock %}

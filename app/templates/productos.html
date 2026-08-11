@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 
-{% block title %}Productos | Monitor Pautas{% endblock %}
+{% block title %}Productos | Envío monitor{% endblock %}
 
 {% block content %}
 <section class="page-header page-header--split">
   <div>
     <p class="eyebrow">Base</p>
     <h1 class="page-title titulos">Productos</h1>
-    <p class="page-subtitle">Consulta y edición del maestro de productos y sus anunciantes.</p>
+    <p class="page-subtitle">Consulta y edición del maestro de productos.</p>
   </div>
 </section>
 
@@ -20,12 +20,11 @@
 <section class="panel panel--tight">
   <form method="get" action="/productos" class="filter-grid">
     <label class="field field--wide">
-      <span class="field-label">Texto libre</span>
-      <input class="input" type="text" name="q" value="{{ filters.q }}" placeholder="Producto o anunciante">
+      <span class="field-label">Producto</span>
+      <input class="input" type="text" name="q" value="{{ filters.q }}" placeholder="Buscar producto">
     </label>
-
     <label class="field">
-      <span class="field-label">Anunciante</span>
+      <span class="field-label">Anunciante asignado</span>
       <select class="input" name="id_anunciante">
         <option value="">Todos</option>
         {% for anunciante in anunciantes %}
@@ -35,7 +34,6 @@
         {% endfor %}
       </select>
     </label>
-
     <label class="field">
       <span class="field-label">Categoría</span>
       <select class="input" name="categoria">
@@ -45,7 +43,6 @@
         {% endfor %}
       </select>
     </label>
-
     <div class="filter-actions">
       <button class="button" type="submit">Filtrar</button>
       <a class="button button-secondary" href="/productos">Limpiar</a>
@@ -53,22 +50,11 @@
   </form>
 </section>
 
-<datalist id="alcances-list">
-  {% for alcance in alcances %}
-  <option value="{{ alcance }}"></option>
-  {% endfor %}
-</datalist>
-<datalist id="categorias-list">
-  {% for categoria in categorias %}
-  <option value="{{ categoria }}"></option>
-  {% endfor %}
-</datalist>
-
 <section class="panel">
   <div class="panel-header">
     <div>
       <p class="eyebrow">Maestro de productos</p>
-      <h2 class="panel-title">Productos asignados</h2>
+      <h2 class="panel-title">Productos</h2>
     </div>
     <span class="panel-meta">{{ productos|length }} filas</span>
   </div>
@@ -77,7 +63,7 @@
       <thead>
         <tr>
           <th>Producto</th>
-          <th>Anunciante</th>
+          <th>Anunciante asignado</th>
           <th>Alcance</th>
           <th>Categoría</th>
           <th>Acción</th>
@@ -85,12 +71,7 @@
       </thead>
       <tbody>
         {% for item in productos %}
-        <tr
-          data-product-row="{{ item.id_producto }}"
-          data-product-id="{{ item.id_producto }}"
-          data-product-name="{{ item.producto or '' }}"
-          data-product-anunciante="{{ item.id_anunciante or '' }}"
-        >
+        <tr data-product-row data-product-id="{{ item.id_producto }}" data-product-name="{{ item.producto or '' }}" data-product-anunciante="{{ item.id_anunciante or '' }}">
           <td>{{ item.producto or "-" }}</td>
           <td>{{ item.anunciante or "-" }}</td>
           <td>{{ item.alcance or "-" }}</td>
@@ -98,9 +79,7 @@
           <td><button class="button button-small" type="button" data-edit-product>Editar</button></td>
         </tr>
         {% else %}
-        <tr>
-          <td colspan="5" class="empty-state">No hay productos para los filtros seleccionados.</td>
-        </tr>
+        <tr><td colspan="5" class="empty-state">No hay productos para los filtros seleccionados.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -116,10 +95,10 @@
     <input type="hidden" name="id_producto" data-product-editor-id>
     <label class="field">
       <span class="field-label">Producto</span>
-      <input class="input input--compact" type="text" name="producto" data-product-editor-name>
+      <input class="input input--compact" type="text" name="producto" data-product-editor-name required>
     </label>
     <label class="field">
-      <span class="field-label">Anunciante</span>
+      <span class="field-label">Anunciante asignado</span>
       <select class="input input--compact" name="id_anunciante" data-product-editor-anunciante>
         <option value="">Sin anunciante</option>
         {% for anunciante in anunciantes %}
@@ -134,79 +113,8 @@
   </form>
 </section>
 
-<section class="panel">
-  <div class="panel-header">
-    <div>
-      <p class="eyebrow">Base anunciantes</p>
-      <h2 class="panel-title">Anunciantes</h2>
-    </div>
-    <span class="panel-meta">{{ anunciantes|length }} filas</span>
-  </div>
-  <div class="table-wrap">
-    <table class="data-table control-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Anunciante</th>
-          <th>Alcance</th>
-          <th>Categoría</th>
-          <th>Acción</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in anunciantes %}
-        <tr
-          data-anunciante-row="{{ item.id_anunciante }}"
-          data-anunciante-id="{{ item.id_anunciante }}"
-          data-anunciante-name="{{ item.anunciante or '' }}"
-          data-anunciante-alcance="{{ item.alcance or '' }}"
-          data-anunciante-categoria="{{ item.categoria or '' }}"
-        >
-          <td>{{ item.id_anunciante }}</td>
-          <td>{{ item.anunciante or "-" }}</td>
-          <td>{{ item.alcance or "-" }}</td>
-          <td>{{ item.categoria or "-" }}</td>
-          <td><button class="button button-small" type="button" data-edit-anunciante>Editar</button></td>
-        </tr>
-        {% else %}
-        <tr>
-          <td colspan="5" class="empty-state">No hay anunciantes cargados.</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-
-<section class="panel panel--tight inline-edit-panel" data-anunciante-editor hidden>
-  <div>
-    <p class="eyebrow">Editar</p>
-    <h2 class="panel-title">Anunciante seleccionado</h2>
-  </div>
-  <form method="post" action="/anunciantes/actualizar" class="inline-edit-grid">
-    <input type="hidden" name="id_anunciante" data-anunciante-editor-id>
-    <label class="field">
-      <span class="field-label">Anunciante</span>
-      <input class="input input--compact" type="text" name="anunciante" data-anunciante-editor-name>
-    </label>
-    <label class="field">
-      <span class="field-label">Alcance</span>
-      <input class="input input--compact" list="alcances-list" type="text" name="alcance" data-anunciante-editor-alcance>
-    </label>
-    <label class="field">
-      <span class="field-label">Categoría</span>
-      <input class="input input--compact" list="categorias-list" type="text" name="categoria" data-anunciante-editor-categoria>
-    </label>
-    <div class="filter-actions">
-      <button class="button button-small" type="submit">Guardar</button>
-      <button class="button button-secondary button-small" type="button" data-close-anunciante-editor>Cancelar</button>
-    </div>
-  </form>
-</section>
 <script>
   const productEditor = document.querySelector("[data-product-editor]");
-  const anuncianteEditor = document.querySelector("[data-anunciante-editor]");
-
   document.querySelectorAll("[data-edit-product]").forEach((button) => {
     button.addEventListener("click", () => {
       const row = button.closest("[data-product-row]");
@@ -218,26 +126,8 @@
       productEditor.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
-
-  document.querySelectorAll("[data-edit-anunciante]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const row = button.closest("[data-anunciante-row]");
-      if (!row || !anuncianteEditor) return;
-      anuncianteEditor.querySelector("[data-anunciante-editor-id]").value = row.dataset.anuncianteId || "";
-      anuncianteEditor.querySelector("[data-anunciante-editor-name]").value = row.dataset.anuncianteName || "";
-      anuncianteEditor.querySelector("[data-anunciante-editor-alcance]").value = row.dataset.anuncianteAlcance || "";
-      anuncianteEditor.querySelector("[data-anunciante-editor-categoria]").value = row.dataset.anuncianteCategoria || "";
-      anuncianteEditor.hidden = false;
-      anuncianteEditor.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    });
-  });
-
   document.querySelector("[data-close-product-editor]")?.addEventListener("click", () => {
     if (productEditor) productEditor.hidden = true;
-  });
-
-  document.querySelector("[data-close-anunciante-editor]")?.addEventListener("click", () => {
-    if (anuncianteEditor) anuncianteEditor.hidden = true;
   });
 </script>
 {% endblock %}

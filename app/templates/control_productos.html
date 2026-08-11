@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 
-{% block title %}Anunciantes | Monitor Pautas{% endblock %}
+{% block title %}Asignación Prod-Anunc | Envío monitor{% endblock %}
 
 {% block content %}
 <section class="page-header page-header--split">
   <div>
     <p class="eyebrow">Control</p>
-    <h1 class="page-title titulos">Anunciantes</h1>
+    <h1 class="page-title titulos">Asignación Prod-Anunc</h1>
     <p class="page-subtitle">Asignación manual de productos nuevos a anunciantes y control de productos ya reconocidos.</p>
   </div>
 </section>
@@ -48,6 +48,13 @@
   </form>
 </section>
 
+<datalist id="control-alcances-list">
+  {% for alcance in alcances %}<option value="{{ alcance }}"></option>{% endfor %}
+</datalist>
+<datalist id="control-categorias-list">
+  {% for categoria in categorias %}<option value="{{ categoria }}"></option>{% endfor %}
+</datalist>
+
 <section class="panel panel--tight">
   <div class="panel-header">
     <div>
@@ -55,35 +62,25 @@
       <h2 class="panel-title">Crear anunciante rápido</h2>
     </div>
   </div>
-  <form method="post" action="/control-productos/anunciante" class="control-create-form">
+  <form method="post" action="/anunciantes/crear" class="control-create-form">
+    <input type="hidden" name="return_to" value="control-productos">
     <label class="field">
-      <span class="field-label">Anunciante</span>
+      <span class="field-label">Nombre</span>
       <input class="input" type="text" name="anunciante" required>
     </label>
     <label class="field">
-      <span class="field-label">Alcance</span>
-      <input class="input" list="alcances-list" name="alcance">
+      <span class="field-label">Categoría</span>
+      <input class="input" type="text" name="categoria" list="control-categorias-list">
     </label>
     <label class="field">
-      <span class="field-label">Categoría</span>
-      <input class="input" list="categorias-list" name="categoria">
+      <span class="field-label">Alcance</span>
+      <input class="input" type="text" name="alcance" list="control-alcances-list">
     </label>
     <div class="filter-actions">
-      <button class="button" type="submit">Crear anunciante</button>
+      <button class="button" type="submit"><i class="bi bi-plus-lg"></i> Crear anunciante</button>
     </div>
   </form>
 </section>
-
-<datalist id="alcances-list">
-  {% for alcance in alcances %}
-  <option value="{{ alcance }}"></option>
-  {% endfor %}
-</datalist>
-<datalist id="categorias-list">
-  {% for categoria in categorias %}
-  <option value="{{ categoria }}"></option>
-  {% endfor %}
-</datalist>
 
 {% if auto_assigned_rows %}
 <section class="panel">
@@ -129,6 +126,7 @@
 {% endif %}
 
 <section class="panel">
+  {% if mostrar_sugerencias %}
   <form method="post" action="/control-productos/asignar-promos-canal">
     <div class="panel-header">
       <div>
@@ -197,6 +195,22 @@
       </table>
     </div>
   </form>
+  {% else %}
+  <div class="panel-header">
+    <div>
+      <p class="eyebrow">Sugerencias</p>
+      <h2 class="panel-title">Coincidencias automáticas</h2>
+    </div>
+  </div>
+  <p class="page-subtitle">Calculá las sugerencias cuando las necesites para mantener rápida la carga inicial.</p>
+  <form method="get" action="/control-productos" class="filter-actions">
+    <input type="hidden" name="mostrar_sugerencias" value="true">
+    {% if filters.fecha_desde %}<input type="hidden" name="fecha_desde" value="{{ filters.fecha_desde }}">{% endif %}
+    {% if filters.fecha_hasta %}<input type="hidden" name="fecha_hasta" value="{{ filters.fecha_hasta }}">{% endif %}
+    {% if filters.archivo_id %}<input type="hidden" name="archivo_id" value="{{ filters.archivo_id }}">{% endif %}
+    <button class="button" type="submit"><i class="bi bi-stars"></i> Buscar sugerencias automáticas</button>
+  </form>
+  {% endif %}
 </section>
 
 <section class="panel">
@@ -263,55 +277,6 @@
   </div>
 </section>
 
-<section class="panel">
-  <div class="panel-header">
-    <div>
-      <p class="eyebrow">Control temporal</p>
-      <h2 class="panel-title">Productos ya cargados que matchearon</h2>
-    </div>
-    <div class="panel-actions">
-      <button class="button button-secondary button-small" type="button" data-toggle-panel="matched-products-panel" aria-expanded="false">Ver detalle</button>
-      <span class="panel-meta">{{ matched_rows|length }} grupos</span>
-    </div>
-  </div>
-
-  <div class="table-wrap" id="matched-products-panel" hidden>
-    <table class="data-table control-table">
-      <thead>
-        <tr>
-          <th>Código</th>
-          <th>Producto cronograma</th>
-          <th>Producto maestro</th>
-          <th>Anunciante</th>
-          <th>Alcance</th>
-          <th>Categoría</th>
-          <th>Última fecha</th>
-          <th>Filas</th>
-          <th>Segundos</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in matched_rows %}
-        <tr>
-          <td>{{ row.cod_prod }}</td>
-          <td>{{ row.producto_cronograma or "-" }}<br><span class="muted-cell">{{ row.tema_cronograma or "" }}</span></td>
-          <td>{{ row.producto_base or "-" }}<br><span class="muted-cell">{{ row.tema_base or "" }}</span></td>
-          <td>{{ row.anunciante or "-" }}</td>
-          <td>{{ row.alcance or "-" }}</td>
-          <td>{{ row.categoria or "-" }}</td>
-          <td>{{ row.ultima_fecha.strftime("%d/%m/%Y") if row.ultima_fecha else "-" }}</td>
-          <td>{{ row.filas }}</td>
-          <td>{{ row.segundos }}</td>
-        </tr>
-        {% else %}
-        <tr>
-          <td colspan="9" class="empty-state">Todavía no hay productos matcheados para mostrar.</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
 <script>
   (() => {
     const normalize = (value) =>
@@ -399,17 +364,6 @@
       }
     });
 
-    document.querySelectorAll("[data-toggle-panel]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const panel = document.getElementById(button.dataset.togglePanel);
-        if (!panel) return;
-
-        const shouldOpen = panel.hidden;
-        panel.hidden = !shouldOpen;
-        button.setAttribute("aria-expanded", String(shouldOpen));
-        button.textContent = shouldOpen ? "Ocultar detalle" : "Ver detalle";
-      });
-    });
   })();
 </script>
 {% endblock %}

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>if(localStorage.getItem("app_theme")==="dark"){document.documentElement.dataset.theme="dark"}</script>
+  <title>Ingreso · Comercial</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-panel">
+      <div class="login-brand">
+        <img class="login-logo" src="{{ url_for('static', path='/logoc12_1.png') }}" alt="Canal Doce">
+        <div>
+          <span class="eyebrow">Comercial</span>
+          <h1>Monitor de archivos</h1>
+        </div>
+      </div>
+
+      {% if error %}<div class="login-alert"><i class="bi bi-exclamation-triangle-fill"></i> {{ error }}</div>{% endif %}
+
+      <form method="post" action="/login" class="login-form">
+        <input type="hidden" name="next_url" value="{{ next_url }}">
+        <label class="field">
+          <span>Usuario de red</span>
+          <input name="username" maxlength="100" autocomplete="username" required autofocus value="{{ username or '' }}" placeholder="usuario">
+        </label>
+        <label class="field">
+          <span>Contraseña</span>
+          <input type="password" name="password" autocomplete="current-password" required placeholder="Contraseña">
+        </label>
+        <button class="button login-submit" type="submit"><i class="bi bi-box-arrow-in-right"></i> Ingresar</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>
