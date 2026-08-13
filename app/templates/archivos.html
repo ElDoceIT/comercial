@@ -14,10 +14,20 @@
   </form>
 </section>
 
+<section class="panel panel--tight">
+  <form method="post" action="/archivos/complementario" enctype="multipart/form-data" class="complementary-upload-form">
+    <label class="field">
+      <span class="field-label">Archivo complementario (CSV, XLS o XLSX)</span>
+      <input class="input" type="file" name="archivo" accept=".csv,.xls,.xlsx" required>
+    </label>
+    <button class="button button-secondary" type="submit"><i class="bi bi-file-earmark-arrow-up"></i> Adjuntar archivo complementario</button>
+  </form>
+</section>
+
 {% if process_message %}
 <section class="panel panel--tight process-message process-message--{{ process_status or 'ok' }}">
   <strong>{{ process_message }}</strong>
-  <span>Origen: Google Drive</span>
+  <span>{% if "Complementario" in process_message or "complementario" in process_message %}Origen: archivo complementario{% else %}Origen: Google Drive{% endif %}</span>
 </section>
 {% endif %}
 

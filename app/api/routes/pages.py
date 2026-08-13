@@ -1,4 +1,5 @@
 import csv
+import json
 import logging
 import secrets
 import zipfile
@@ -12,7 +13,7 @@ from time import perf_counter
 from xml.sax.saxutils import escape
 from urllib.parse import parse_qs, quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, literal, or_
@@ -175,6 +176,92 @@ def run_drive_process(db: Session = Depends(get_db)):
     )
 
 
+@router.post("/archivos/complementario")
+async def upload_complementary_file(
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    filename = Path(archivo.filename or "archivo_complementario").name
+    try:
+        result = ProcessingService().load_complementary_file_to_db(
+            db=db,
+            filename=filename,
+            content=await archivo.read(),
+        )
+        master_created = 0
+        topics_created = 0
+        for product, topic in result["productos"]:
+            maestro = (
+                db.query(MaestroProducto)
+                .filter(_match_text_expr(MaestroProducto.producto) == product.strip().lower())
+                .first()
+            )
+            if maestro is None:
+                maestro = MaestroProducto(producto=product.strip(), id_anunciante=None)
+                db.add(maestro)
+                db.flush()
+                master_created += 1
+            normalized_topic = topic.strip()
+            topic_query = db.query(ProductoTema).filter(ProductoTema.id_producto == maestro.id)
+            if normalized_topic:
+                topic_query = topic_query.filter(
+                    _match_text_expr(ProductoTema.tema) == normalized_topic.lower()
+                )
+            else:
+                topic_query = topic_query.filter(ProductoTema.tema.is_(None))
+            product_topic = topic_query.first()
+            if product_topic is None:
+                product_topic = ProductoTema(
+                    id_producto=maestro.id,
+                    tema=normalized_topic or None,
+                    cod_producto=None,
+                )
+                db.add(product_topic)
+                topics_created += 1
+
+            product_code = product_topic.cod_producto
+            if not product_code:
+                product_code = f"C{secrets.randbelow(10**12):012d}"
+                product_topic.cod_producto = product_code
+
+            cronograma_query = db.query(Cronograma).filter(
+                Cronograma.archivo_ingesta_id.in_(result["archivo_ingesta_ids"]),
+                _match_text_expr(Cronograma.producto) == product.strip().lower(),
+            )
+            if normalized_topic:
+                cronograma_query = cronograma_query.filter(
+                    _match_text_expr(Cronograma.tema) == normalized_topic.lower()
+                )
+            else:
+                cronograma_query = cronograma_query.filter(Cronograma.tema.is_(None))
+            cronograma_query.update(
+                {Cronograma.cod_prod: product_code},
+                synchronize_session=False,
+            )
+        db.commit()
+        message = (
+            f"Complementario procesado: {result['filas_insertadas']} filas, "
+            f"{result['bloques_insertados']} fechas/canales cargados y "
+            f"{result['bloques_omitidos']} omitidos por duplicados. "
+            f"Productos nuevos: {master_created}. Temas nuevos: {topics_created}."
+        )
+        status = "ok"
+    except (DuplicateArchivoIngestaError, ProcessingServiceError) as exc:
+        db.rollback()
+        message = str(exc)
+        status = "error"
+    except Exception:
+        db.rollback()
+        logger.exception("Error al procesar archivo complementario")
+        message = "No se pudo procesar el archivo complementario."
+        status = "error"
+
+    return RedirectResponse(
+        url=f"/archivos?process_status={quote(status)}&process_message={quote(message)}",
+        status_code=303,
+    )
+
+
 def _home_process_redirect_url(*, status: str, message: str) -> str:
     return f"/archivos?process_status={quote(status)}&process_message={quote(message)}"
 
@@ -201,7 +288,9 @@ def _get_unmatched_product_rows(
         .select_from(Cronograma)
     )
     query = _join_resolved_maestro(query, db)
-    query = query.filter(MaestroProducto.id.is_(None))
+    query = query.filter(
+        or_(MaestroProducto.id.is_(None), MaestroProducto.id_anunciante.is_(None))
+    )
     query = query.filter(Cronograma.producto.isnot(None))
     query = query.filter(func.trim(Cronograma.producto) != "")
     query = _apply_control_product_filters(
@@ -969,12 +1058,12 @@ def _get_auto_assignment_candidates(db: Session):
     query = _join_resolved_maestro(query, db)
     return (
         query
-        .filter(MaestroProducto.id.is_(None))
+        .filter(or_(MaestroProducto.id.is_(None), MaestroProducto.id_anunciante.is_(None)))
         .filter(Cronograma.producto.isnot(None))
         .filter(func.trim(Cronograma.producto) != "")
         .filter(Cronograma.cod_prod.isnot(None))
         .filter(Cronograma.cod_prod != "")
-        .filter(Cronograma.cod_prod.op("REGEXP")("^[0-9]+$"))
+        .filter(Cronograma.cod_prod.op("REGEXP")("^([0-9]+|C[0-9]+)$"))
         .group_by(Cronograma.cod_prod, Cronograma.producto, Cronograma.tema, Cronograma.canal)
         .order_by(duracion_expr.desc())
         .all()
@@ -994,7 +1083,7 @@ def _get_pending_product_codes_by_name(
         .select_from(Cronograma)
         .filter(Cronograma.cod_prod.isnot(None))
         .filter(Cronograma.cod_prod != "")
-        .filter(Cronograma.cod_prod.op("REGEXP")("^[0-9]+$"))
+        .filter(Cronograma.cod_prod.op("REGEXP")("^([0-9]+|C[0-9]+)$"))
         .group_by(Cronograma.cod_prod, Cronograma.producto, Cronograma.tema)
         .all()
     )
@@ -1003,7 +1092,7 @@ def _get_pending_product_codes_by_name(
     for row in rows:
         if _normalize_match_text(row.producto) != product_name:
             continue
-        cod_producto = int(row.cod_prod)
+        cod_producto = str(row.cod_prod)
         key = (cod_producto, _normalize_match_text(row.tema))
         pending_variants[key] = {
             "cod_producto": cod_producto,
@@ -1081,7 +1170,7 @@ def _build_auto_assignment_suggestions(
     learned_product_matches: dict[str, list[dict[str, object]]],
     learned_brand_matches: dict[str, list[dict[str, object]]],
 ) -> tuple[list[dict[str, object]], int, int, int]:
-    by_code: dict[int, list[dict[str, object]]] = defaultdict(list)
+    by_code: dict[str, list[dict[str, object]]] = defaultdict(list)
     missing_advertiser = 0
     unresolved = 0
     advertiser_token_counts = _build_advertiser_token_counts(anunciantes)
@@ -1099,7 +1188,7 @@ def _build_auto_assignment_suggestions(
         )
         if anunciante is None:
             if rule == "Ambiguo":
-                by_code[int(row.cod_prod)].append(
+                by_code[str(row.cod_prod)].append(
                     {
                         "status": "ambiguous",
                         "producto": row.producto,
@@ -1116,7 +1205,7 @@ def _build_auto_assignment_suggestions(
                 unresolved += 1
             continue
 
-        by_code[int(row.cod_prod)].append(
+        by_code[str(row.cod_prod)].append(
             {
                 "status": "resolved",
                 "producto": row.producto,
@@ -1196,7 +1285,7 @@ def _apply_auto_assignment_suggestions(
     suggestions: list[dict[str, object]],
     *,
     allowed_rules: set[str] | None = None,
-    selected_ids_by_code: dict[int, int | None] | None = None,
+    selected_ids_by_code: dict[str, int | None] | None = None,
 ) -> dict[str, object]:
     created = 0
     already_exists = 0
@@ -1210,7 +1299,7 @@ def _apply_auto_assignment_suggestions(
             skipped_by_rule += 1
             continue
 
-        cod_producto = int(suggestion["cod_prod"])
+        cod_producto = str(suggestion["cod_prod"])
         if selected_ids_by_code is None:
             id_anunciante = _parse_optional_int(suggestion.get("id_anunciante"))
         else:
@@ -1239,11 +1328,11 @@ def _apply_auto_assignment_suggestions(
         )
         product_changed = maestro_created
         for pending in pending_products:
-            pending_code = int(pending["cod_producto"])
+            pending_code = str(pending["cod_producto"])
             _producto_tema, tema_created = _get_or_create_producto_tema(
                 db,
                 id_producto=maestro.id,
-                cod_producto=str(pending_code),
+                cod_producto=pending_code,
                 tema=str(pending["tema"] or "").strip() or None,
             )
             if tema_created:
@@ -1946,8 +2035,8 @@ async def assign_channel_promos_and_word_matches(
         db
     )
     selected_ids_by_code = {
-        int(suggestion["cod_prod"]): _parse_optional_int(
-            form.get(f"id_anunciante_{int(suggestion['cod_prod'])}")
+        str(suggestion["cod_prod"]): _parse_optional_int(
+            form.get(f"id_anunciante_{suggestion['cod_prod']}")
         )
         for suggestion in suggestions
     }
@@ -2604,7 +2693,11 @@ def archivos_view(request: Request, db: Session = Depends(get_db)):
     expected_channels = set(channel_codes)
     received_by_date: dict[date, set[str]] = defaultdict(set)
     received_rows = (
-        db.query(ArchivoIngesta.fecha_nombre_archivo, ArchivoIngesta.canal_codigo)
+        db.query(
+            ArchivoIngesta.fecha_nombre_archivo,
+            ArchivoIngesta.canal_codigo,
+            ArchivoIngesta.fechas_detectadas,
+        )
         .filter(
             ArchivoIngesta.fecha_nombre_archivo >= missing_period_start,
             ArchivoIngesta.fecha_nombre_archivo <= missing_period_end,
@@ -2613,9 +2706,23 @@ def archivos_view(request: Request, db: Session = Depends(get_db)):
         .distinct()
         .all()
     )
-    for received_date, channel_code in received_rows:
-        if received_date and channel_code:
-            received_by_date[received_date].add(str(channel_code).strip())
+    for filename_date, channel_code, detected_dates_json in received_rows:
+        detected_dates: list[date] = []
+        try:
+            detected_dates = [
+                date.fromisoformat(str(value))
+                for value in json.loads(detected_dates_json or "[]")
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            detected_dates = []
+        if not detected_dates and filename_date:
+            detected_dates = [filename_date]
+        for received_date in detected_dates:
+            if (
+                missing_period_start <= received_date <= missing_period_end
+                and channel_code
+            ):
+                received_by_date[received_date].add(str(channel_code).strip())
 
     missing_channels = [
         {"fecha": received_date, "canal": channel_codes[channel_code]}

@@ -497,6 +497,19 @@ body {
   align-items: end;
 }
 
+.complementary-upload-form {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+@media (max-width: 720px) {
+  .complementary-upload-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .alert-filter-grid {
   grid-template-columns: minmax(150px, .7fr) minmax(150px, .7fr) minmax(280px, 1.6fr) auto;
 }

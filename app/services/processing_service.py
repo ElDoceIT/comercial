@@ -1,10 +1,13 @@
 import json
 import re
-from datetime import date, datetime
+import hashlib
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import tuple_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -63,6 +66,181 @@ class ProcessingService:
         "CB 08 CORDOBA 8": "Canal 8",
         "CB 12 CORDOBA EL DOCE": "Canal 12",
     }
+    COMPLEMENTARY_CHANNEL_MAPPING = {
+        "TELEFE": ("Canal 8", "1551"),
+        "CANAL 8": ("Canal 8", "1551"),
+        "CANAL 10": ("Canal 10", "1553"),
+        "CANAL 12": ("Canal 12", "1554"),
+    }
+
+    def load_complementary_file_to_db(
+        self,
+        *,
+        db: Session,
+        filename: str,
+        content: bytes,
+    ) -> dict[str, object]:
+        if not content:
+            raise ProcessingServiceError("El archivo complementario está vacío.")
+
+        suffix = Path(filename).suffix.lower()
+        try:
+            if suffix == ".csv":
+                dataframe = pd.read_csv(BytesIO(content), sep=None, engine="python", dtype=object)
+            elif suffix == ".xls":
+                dataframe = pd.read_excel(BytesIO(content), dtype=object, engine="xlrd")
+            elif suffix == ".xlsx":
+                dataframe = pd.read_excel(BytesIO(content), dtype=object, engine="openpyxl")
+            else:
+                raise ProcessingServiceError("El archivo debe ser CSV, XLS o XLSX.")
+        except ProcessingServiceError:
+            raise
+        except Exception as exc:
+            raise ProcessingServiceError("No se pudo leer el archivo complementario.") from exc
+
+        required = {"Canal", "Fecha", "Hora Inicio", "Producto / Tema", "Dur.Av.", "Mat.", "Programa", "Tipo Compra"}
+        dataframe.columns = [str(column).strip() for column in dataframe.columns]
+        missing = sorted(required - set(dataframe.columns))
+        if missing:
+            raise ProcessingServiceError(f"Faltan columnas requeridas: {', '.join(missing)}.")
+
+        parsed_rows: list[dict[str, object]] = []
+        detected_pairs: set[tuple[date, str]] = set()
+        channel_codes: set[str] = set()
+        for index, source_row in dataframe.iterrows():
+            try:
+                raw_channel = self._normalize_complementary_text(source_row["Canal"])
+                channel_key = raw_channel.replace(" CORDOBA", "").strip()
+                channel_info = self.COMPLEMENTARY_CHANNEL_MAPPING.get(channel_key)
+                if channel_info is None:
+                    raise ValueError(f"canal no reconocido: {raw_channel}")
+                channel, channel_code = channel_info
+                row_date = pd.to_datetime(source_row["Fecha"], dayfirst=True, errors="raise").date()
+                start_time = self._parse_complementary_time(source_row["Hora Inicio"])
+                duration = self._parse_duracion_for_mysql(source_row["Dur.Av."])
+                if duration is None:
+                    raise ValueError("duración vacía")
+                start_datetime = datetime.combine(row_date, start_time)
+                end_time = (start_datetime + timedelta(seconds=duration)).time()
+                product_topic = self._clean_complementary_value(source_row["Producto / Tema"]) or ""
+                product, separator, topic = product_topic.partition("/")
+                if not product.strip():
+                    raise ValueError("producto vacío")
+
+                parsed_rows.append({
+                    "hora_inicio": start_time.strftime("%H:%M:%S"),
+                    "hora_fin": end_time.strftime("%H:%M:%S"),
+                    "cod_prod": None,
+                    "producto": product.strip(),
+                    "tema": topic.strip() if separator and topic.strip() else None,
+                    "duracion": duration,
+                    "t_compra": self._clean_complementary_value(source_row["Tipo Compra"]),
+                    "t_material": self._clean_complementary_value(source_row["Mat."]),
+                    "columna_extra": None,
+                    "alcance": None,
+                    "prom_canal": None,
+                    "programa": self._clean_complementary_value(source_row["Programa"]),
+                    "canal": channel,
+                    "fecha": row_date,
+                    "dia_semana": row_date.isoweekday(),
+                    "tipo_dia": "Fin de semana" if row_date.weekday() >= 5 else "Hábil",
+                })
+                detected_pairs.add((row_date, channel))
+                channel_codes.add(channel_code)
+            except Exception as exc:
+                raise ProcessingServiceError(f"Fila {index + 2} inválida: {exc}.") from exc
+
+        if not parsed_rows:
+            raise ProcessingServiceError("No se encontraron filas para importar.")
+
+        existing_pairs = set(
+            db.query(Cronograma.fecha, Cronograma.canal)
+            .filter(
+                tuple_(Cronograma.fecha, Cronograma.canal).in_(detected_pairs)
+            )
+            .distinct()
+            .all()
+        )
+        accepted_rows = [
+            row for row in parsed_rows
+            if (row["fecha"], row["canal"]) not in existing_pairs
+        ]
+        accepted_pairs = detected_pairs - existing_pairs
+        if not accepted_rows:
+            raise ProcessingServiceError("Todas las combinaciones de fecha y canal ya existen en cronogramas.")
+
+        digest = hashlib.sha256(content).hexdigest()
+        drive_file_id = f"complementario::{digest}"
+        if db.query(ArchivoIngesta.id).filter(ArchivoIngesta.drive_file_id.like(f"{drive_file_id}::%")).first():
+            raise DuplicateArchivoIngestaError("Este archivo complementario ya fue procesado.")
+
+        try:
+            code_by_channel = {value[0]: value[1] for value in self.COMPLEMENTARY_CHANNEL_MAPPING.values()}
+            rows_by_pair: dict[tuple[date, str], list[dict[str, object]]] = {}
+            ingesta_ids: list[int] = []
+            for row in accepted_rows:
+                rows_by_pair.setdefault((row["fecha"], row["canal"]), []).append(row)
+            for (row_date, channel), pair_rows in rows_by_pair.items():
+                ingesta = ArchivoIngesta(
+                    drive_file_id=f"{drive_file_id}::{row_date.isoformat()}::{code_by_channel[channel]}",
+                    nombre_archivo=filename,
+                    canal_codigo=code_by_channel[channel],
+                    fecha_nombre_archivo=row_date,
+                    cantidad_dias_detectados=1,
+                    fechas_detectadas=json.dumps([row_date.isoformat()]),
+                    estado="procesado",
+                    procesamiento_completo=True,
+                    fecha_inicio_proceso=datetime.now(),
+                    fecha_fin_proceso=datetime.now(),
+                    filas_procesadas=len(pair_rows),
+                )
+                db.add(ingesta)
+                db.flush()
+                ingesta_ids.append(ingesta.id)
+                for row in pair_rows:
+                    row["archivo_ingesta_id"] = ingesta.id
+                db.add_all(Cronograma(**row) for row in pair_rows)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise ProcessingServiceError("No se pudo guardar la carga complementaria.") from exc
+
+        return {
+            "filas_insertadas": len(accepted_rows),
+            "bloques_insertados": len(accepted_pairs),
+            "bloques_omitidos": len(existing_pairs),
+            "productos": {(str(row["producto"]), str(row["tema"] or "")) for row in accepted_rows},
+            "archivo_ingesta_ids": ingesta_ids,
+        }
+
+    def _normalize_complementary_text(self, value: object) -> str:
+        text = str(value or "").upper().strip()
+        text = text.replace("Ó", "O")
+        return " ".join(text.split())
+
+    def _clean_complementary_value(self, value: object) -> str | None:
+        if value is None or pd.isna(value):
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _parse_complementary_time(self, value: object) -> time:
+        if isinstance(value, time):
+            return value
+        if isinstance(value, (datetime, pd.Timestamp)):
+            return value.time()
+        if isinstance(value, (int, float, Decimal)) and not pd.isna(value):
+            seconds = round(float(value) * 24 * 60 * 60) % (24 * 60 * 60)
+            return (datetime.min + timedelta(seconds=seconds)).time()
+        text = str(value).strip()
+        extended_match = re.fullmatch(r"(\d+):(\d{1,2})(?::(\d{1,2}))?", text)
+        if extended_match:
+            hours, minutes, seconds = (int(part or 0) for part in extended_match.groups())
+            if minutes > 59 or seconds > 59:
+                raise ValueError(f"hora inválida: {text}")
+            total_seconds = (hours * 3600 + minutes * 60 + seconds) % (24 * 60 * 60)
+            return (datetime.min + timedelta(seconds=total_seconds)).time()
+        return pd.to_datetime(text, errors="raise").time()
 
     def inspect_xls_file(self, file_path: str) -> dict[str, object]:
         path = Path(file_path)
