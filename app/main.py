@@ -15,6 +15,7 @@ from app.api.routes.pages import router as pages_router
 from app.api.routes.processing import router as processing_router
 from app.core.config import get_settings
 from app.db import get_db
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.services.ad_auth import ActiveDirectoryAuthError, authenticate_ad_user
 from app.services.local_auth import (
     authenticate_local_user,
@@ -27,6 +28,8 @@ from app.services.local_auth import (
 settings = get_settings()
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title=settings.app_name)
+# Le dice a FastAPI que confíe en los encabezados enviadas por Nginx (X-Forwarded-Proto, etc.)
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
