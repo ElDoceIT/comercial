@@ -11,8 +11,8 @@
     <label class="field"><span class="field-label">Nombre</span><input class="input" name="nombre" required value="{{ item.first_name }}"></label>
     <label class="field"><span class="field-label">Apellido</span><input class="input" name="apellido" required value="{{ item.last_name }}"></label>
     <label class="field"><span class="field-label">Correo</span><input class="input" name="correo" type="email" value="{{ item.email or '' }}"></label>
-    <label class="field"><span class="field-label">Rol</span><select class="input" name="rol"><option>USUARIO</option><option>ADMIN</option></select></label>
-    <label class="field"><span class="field-label">Perfil</span><select class="input" name="perfil"><option>OPERADOR</option><option>ADMIN</option></select></label>
+    <label class="field"><span class="field-label">Rol</span><select class="input" name="rol"><option>COMERCIAL</option><option>ADMINISTRACION</option><option>ADMIN</option></select></label>
+    <label class="field"><span class="field-label">Perfil</span><select class="input" name="perfil"><option>USUARIO</option><option>JEFE</option></select></label>
     <div class="filter-actions"><button class="button" type="submit">Incorporar usuario</button></div>
   </form>{% else %}<p class="empty-state">No hay usuarios nuevos.</p>{% endfor %}
 </section>

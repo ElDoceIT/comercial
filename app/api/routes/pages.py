@@ -75,6 +75,8 @@ TRUSTED_AUTO_ASSIGNMENT_RULES = {
     "Producto aprendido",
     "Marca aprendida",
 }
+USER_ROLES = ("ADMIN", "COMERCIAL", "ADMINISTRACION")
+USER_PROFILES = ("USUARIO", "JEFE")
 EXPORT_CRONOGRAMAS_COLUMNS = [
     ("Hora Inicio", "hora_inicio"),
     ("Hora Fin", "hora_fin"),
@@ -1697,8 +1699,6 @@ def usuarios_view(
             usuarios_ad = list_ad_group_users()
         except ActiveDirectoryAuthError as exc:
             usuarios_ad, error_ad = [], str(exc)
-    roles = sorted({"ADMIN", "USUARIO", *(u.rol for u in usuarios if u.rol)})
-    perfiles = sorted({"ADMIN", "OPERADOR", *(u.perfil for u in usuarios if u.perfil)})
     return templates.TemplateResponse(request, "usuarios.html", {
         "usuarios": usuarios,
         "usuario_edicion": usuario_edicion,
@@ -1706,8 +1706,8 @@ def usuarios_view(
         "error_ad": error_ad,
         "guardado": guardado,
         "error": error,
-        "roles": roles,
-        "perfiles": perfiles,
+        "roles": USER_ROLES,
+        "perfiles": USER_PROFILES,
     })
 
 
@@ -1718,12 +1718,16 @@ async def crear_usuario(request: Request, db: Session = Depends(get_db)):
     username = normalize_username(form.get("username", ""))
     password = form.get("password", "")
     origen = form.get("origen", "LOCAL").strip().upper()
+    rol = form.get("rol", "").strip().upper()
+    perfil = form.get("perfil", "").strip().upper()
     if not all((form.get("nombre", "").strip(), form.get("apellido", "").strip(), username)):
         return RedirectResponse(_usuarios_redirect(error="Completá los campos obligatorios."), 303)
     if db.query(Usuario).filter(func.lower(Usuario.username) == username).first():
         return RedirectResponse(_usuarios_redirect(error="El usuario ya existe."), 303)
     if origen == "LOCAL" and len(password) < 8:
         return RedirectResponse(_usuarios_redirect(error="La contraseña debe tener al menos 8 caracteres."), 303)
+    if rol not in USER_ROLES or perfil not in USER_PROFILES:
+        return RedirectResponse(_usuarios_redirect(error="El rol o perfil seleccionado no es válido."), 303)
     usuario = Usuario(
         nombre=form.get("nombre", "").strip(),
         apellido=form.get("apellido", "").strip(),
@@ -1732,8 +1736,8 @@ async def crear_usuario(request: Request, db: Session = Depends(get_db)):
         hashed_password=hash_password(password or secrets.token_urlsafe(32)),
         origen=origen,
         status=form.get("status") == "on",
-        rol=form.get("rol", "").strip().upper() or None,
-        perfil=form.get("perfil", "").strip().upper() or None,
+        rol=rol,
+        perfil=perfil,
     )
     db.add(usuario)
     try:
@@ -1752,6 +1756,10 @@ async def actualizar_usuario(usuario_id: int, request: Request, db: Session = De
         raise HTTPException(status_code=404, detail="El usuario no existe.")
     form = await _read_urlencoded_form(request)
     username = normalize_username(form.get("username", ""))
+    rol = form.get("rol", "").strip().upper()
+    perfil = form.get("perfil", "").strip().upper()
+    if rol not in USER_ROLES or perfil not in USER_PROFILES:
+        return RedirectResponse(_usuarios_redirect(error="El rol o perfil seleccionado no es válido."), 303)
     duplicate = db.query(Usuario).filter(
         func.lower(Usuario.username) == username,
         Usuario.id != usuario_id,
@@ -1764,8 +1772,8 @@ async def actualizar_usuario(usuario_id: int, request: Request, db: Session = De
     usuario.username = username
     usuario.origen = form.get("origen", "LOCAL").strip().upper()
     usuario.status = form.get("status") == "on"
-    usuario.rol = form.get("rol", "").strip().upper() or None
-    usuario.perfil = form.get("perfil", "").strip().upper() or None
+    usuario.rol = rol
+    usuario.perfil = perfil
     password = form.get("password", "")
     if password:
         if len(password) < 8:
@@ -1811,6 +1819,10 @@ async def incorporar_usuario_ad(request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if ad_user is None:
         raise HTTPException(status_code=409, detail="El usuario ya no pertenece al grupo AD.")
+    rol = form.get("rol", "COMERCIAL").strip().upper()
+    perfil = form.get("perfil", "USUARIO").strip().upper()
+    if rol not in USER_ROLES or perfil not in USER_PROFILES:
+        raise HTTPException(status_code=400, detail="El rol o perfil seleccionado no es válido.")
     usuario = Usuario(
         nombre=form.get("nombre", "").strip() or ad_user.first_name,
         apellido=form.get("apellido", "").strip() or ad_user.last_name,
@@ -1819,8 +1831,8 @@ async def incorporar_usuario_ad(request: Request, db: Session = Depends(get_db))
         hashed_password=hash_password(secrets.token_urlsafe(32)),
         origen="AD",
         status=True,
-        rol=form.get("rol", "USUARIO").strip().upper(),
-        perfil=form.get("perfil", "OPERADOR").strip().upper(),
+        rol=rol,
+        perfil=perfil,
     )
     db.add(usuario)
     db.commit()

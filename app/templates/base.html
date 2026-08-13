@@ -25,9 +25,14 @@
           <a class="app-submenu-link" href="/productos">Productos</a>
           <a class="app-submenu-link" href="/anunciantes">Anunciantes</a>
           <a class="app-submenu-link" href="/control-productos">Asignación Prod-Anunc</a>
-          {% if request.session.user.role|upper == 'ADMIN' %}<a class="app-submenu-link" href="/configuracion/usuarios">Usuarios</a>{% endif %}
         </div>
       </details>
+      {% if request.session.user.role|upper == 'ADMIN' %}
+      <details class="app-menu-group">
+        <summary class="app-menu-link app-menu-summary">Configuración</summary>
+        <div class="app-submenu"><a class="app-submenu-link" href="/configuracion/usuarios">Usuarios</a></div>
+      </details>
+      {% endif %}
     </div>
     <div class="app-menu-user">
       <span class="app-user-name">{{ request.session.user.display_name or request.session.user.username }}</span>
