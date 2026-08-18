@@ -3,11 +3,12 @@ import json
 import logging
 import secrets
 import zipfile
+import calendar
 from io import BytesIO, StringIO
 import math
 import unicodedata
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from xml.sax.saxutils import escape
@@ -69,6 +70,11 @@ WEEKDAY_LABELS = {
     5: "Viernes",
     6: "Sábado",
     7: "Domingo",
+}
+MONTH_LABELS = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+    5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+    9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
 }
 TRUSTED_AUTO_ASSIGNMENT_RULES = {
     "Regla canal",
@@ -2112,8 +2118,16 @@ def envio_monitor_view(
         )
 
     today = date.today()
-    default_fecha_desde = today - timedelta(days=8)
-    default_fecha_hasta = today - timedelta(days=1)
+    block_started_at = perf_counter()
+    min_fecha, max_fecha = db.query(
+        func.min(Cronograma.fecha),
+        func.max(Cronograma.fecha),
+    ).one()
+    ultima_fecha_cargada = max_fecha
+    log_block("date_limits", block_started_at)
+
+    default_fecha_desde = today.replace(day=1)
+    default_fecha_hasta = ultima_fecha_cargada or (today - timedelta(days=1))
     fecha_desde = fecha_desde or default_fecha_desde.isoformat()
     fecha_hasta = fecha_hasta or default_fecha_hasta.isoformat()
     quick_date_ranges = {
@@ -2306,12 +2320,6 @@ def envio_monitor_view(
     )
     log_block("total_validation", block_started_at)
 
-    block_started_at = perf_counter()
-    min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
-    max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
-    ultima_fecha_cargada = db.query(func.max(Cronograma.fecha)).scalar()
-    log_block("date_limits", block_started_at)
-
     log_block("TOTAL", page_started_at)
 
     return templates.TemplateResponse(
@@ -2411,6 +2419,180 @@ def alertas_comerciales_view(
     )
 
 
+@router.get("/comparativos", response_class=HTMLResponse)
+def comparativos_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    mes: str | None = Query(default=None),
+    alcance: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    anunciante: list[str] | None = Query(default=None),
+    canal: list[str] | None = Query(default=None),
+):
+    max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
+    reference_date = max_fecha or date.today()
+    try:
+        selected_month = datetime.strptime(mes or reference_date.strftime("%Y-%m"), "%Y-%m").date()
+    except ValueError:
+        selected_month = reference_date.replace(day=1)
+    selected_month = selected_month.replace(day=1)
+
+    selected_last_day = calendar.monthrange(selected_month.year, selected_month.month)[1]
+    if (selected_month.year, selected_month.month) == (reference_date.year, reference_date.month):
+        selected_cutoff_day = min(reference_date.day, selected_last_day)
+    else:
+        selected_cutoff_day = selected_last_day
+    current_end = selected_month.replace(day=selected_cutoff_day)
+
+    previous_month = (selected_month - timedelta(days=1)).replace(day=1)
+    previous_end = previous_month.replace(
+        day=min(selected_cutoff_day, calendar.monthrange(previous_month.year, previous_month.month)[1])
+    )
+    previous_year = selected_month.replace(year=selected_month.year - 1)
+    previous_year_end = previous_year.replace(
+        day=min(selected_cutoff_day, calendar.monthrange(previous_year.year, previous_year.month)[1])
+    )
+
+    options = _get_envio_filter_options(db)
+    selected_alcances = _normalize_all_selected(_clean_multi_values(alcance), options["alcances"])
+    selected_categorias = _normalize_all_selected(_clean_multi_values(categoria), options["categorias"])
+    selected_anunciantes = _normalize_all_selected(_clean_multi_values(anunciante), options["anunciantes"])
+    selected_canales = _normalize_all_selected(_clean_multi_values(canal), options["canales"])
+    periods = {
+        "actual": (selected_month, current_end),
+        "anterior": (previous_month, previous_end),
+        "anual": (previous_year, previous_year_end),
+    }
+    period_rows = {
+        key: _get_comparison_base_rows(
+            db=db,
+            fecha_desde=start,
+            fecha_hasta=end,
+            alcances=selected_alcances,
+            categorias=selected_categorias,
+            anunciantes=selected_anunciantes,
+            canales=selected_canales,
+        )
+        for key, (start, end) in periods.items()
+    }
+    comparison_tables = {
+        "alcances": _build_comparison_table(period_rows, "alcance"),
+        "categorias": _build_comparison_table(period_rows, "categoria"),
+        "anunciantes": _build_comparison_table(period_rows, "anunciante"),
+    }
+    for row in comparison_tables["anunciantes"]:
+        metadata = options["anunciante_metadata"].get(
+            row["label"],
+            {"alcances": [], "categorias": []},
+        )
+        row["alcances"] = metadata["alcances"]
+        row["categorias"] = metadata["categorias"]
+    return templates.TemplateResponse(
+        request,
+        "comparativos.html",
+        {
+            "tables": comparison_tables,
+            "options": options,
+            "filters": {
+                "mes": selected_month.strftime("%Y-%m"),
+                "alcances": selected_alcances,
+                "categorias": selected_categorias,
+                "anunciantes": selected_anunciantes,
+                "canales": selected_canales,
+            },
+            "period_labels": {
+                "actual": f"{selected_month.strftime('%m/%Y')} (01–{current_end.day:02d})",
+                "anterior": f"{previous_month.strftime('%m/%Y')} (01–{previous_end.day:02d})",
+                "anual": f"{previous_year.strftime('%m/%Y')} (01–{previous_year_end.day:02d})",
+            },
+            "max_month": reference_date.strftime("%Y-%m"),
+        },
+    )
+
+
+def _get_comparison_base_rows(
+    *,
+    db: Session,
+    fecha_desde: date,
+    fecha_hasta: date,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
+    canales: list[str],
+) -> list[dict[str, object]]:
+    advertiser_expr = _envio_anunciante_expr().label("anunciante")
+    alcance_expr = _envio_alcance_expr().label("alcance")
+    categoria_expr = _envio_categoria_expr().label("categoria")
+    duration_expr = func.sum(Cronograma.duracion).label("duracion_total")
+    query = _envio_base_query(
+        db,
+        advertiser_expr,
+        alcance_expr,
+        categoria_expr,
+        duration_expr,
+    )
+    query = _apply_envio_filters(
+        query,
+        fecha_desde=fecha_desde.isoformat(),
+        fecha_hasta=fecha_hasta.isoformat(),
+        alcances=alcances,
+        categorias=categorias,
+        anunciantes=anunciantes,
+        tipos_dia=[],
+        prom_canal=None,
+    )
+    if canales:
+        query = query.filter(Cronograma.canal.in_(canales))
+    rows = query.group_by(advertiser_expr, alcance_expr, categoria_expr).all()
+    return [
+        {
+            "anunciante": str(row.anunciante or "Sin anunciante").strip(),
+            "alcance": str(row.alcance or "Sin alcance").strip(),
+            "categoria": str(row.categoria or "Sin categoría").strip(),
+            "duracion_total": int(row.duracion_total or 0),
+        }
+        for row in rows
+    ]
+
+
+def _build_comparison_table(
+    period_rows: dict[str, list[dict[str, object]]],
+    dimension: str,
+) -> list[dict[str, object]]:
+    values: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    totals: dict[str, int] = defaultdict(int)
+    for period, rows in period_rows.items():
+        for row in rows:
+            duration = int(row["duracion_total"])
+            values[str(row[dimension])][period] += duration
+            totals[period] += duration
+
+    result = []
+    for label, durations in values.items():
+        shares = {
+            period: (durations.get(period, 0) / totals[period] * 100) if totals[period] else None
+            for period in ("actual", "anterior", "anual")
+        }
+        result.append({
+            "label": label,
+            "actual_seconds": durations.get("actual", 0),
+            "actual_share": shares["actual"],
+            "previous_share": shares["anterior"],
+            "previous_delta": (
+                shares["actual"] - shares["anterior"]
+                if shares["actual"] is not None and shares["anterior"] is not None
+                else None
+            ),
+            "year_share": shares["anual"],
+            "year_delta": (
+                shares["actual"] - shares["anual"]
+                if shares["actual"] is not None and shares["anual"] is not None
+                else None
+            ),
+        })
+    return sorted(result, key=lambda row: (-int(row["actual_seconds"]), str(row["label"])))
+
+
 @router.get("/alertas-comerciales/exportar")
 def export_alertas_comerciales(
     db: Session = Depends(get_db),
@@ -2434,6 +2616,8 @@ def export_alertas_comerciales(
     export_rows = [
         {
             "estado": "Crítica" if row["critical"] else "Atención",
+            "alcance": row["alcance"],
+            "categoria": row["categoria"],
             "anunciante": row["anunciante"],
             "canal_12_seconds": row["canal_12_seconds"],
             "competitor": row["competitor"],
@@ -2449,6 +2633,8 @@ def export_alertas_comerciales(
     ]
     columns = [
         ("Estado", "estado"),
+        ("Alcance", "alcance"),
+        ("Categoría", "categoria"),
         ("Anunciante", "anunciante"),
         ("Segundos Canal 12", "canal_12_seconds"),
         ("Canal competidor", "competitor"),
@@ -2473,6 +2659,7 @@ def alerta_comercial_detail_view(
     fecha_desde: str | None = Query(default=None),
     fecha_hasta: str | None = Query(default=None),
     categoria: list[str] | None = Query(default=None),
+    alcance: str | None = Query(default=None),
 ):
     selected_categories = _clean_multi_values(categoria)
     if categoria is None:
@@ -2490,6 +2677,8 @@ def alerta_comercial_detail_view(
             query = query.filter(Cronograma.fecha <= fecha_hasta)
         if selected_categories:
             query = query.filter(_envio_categoria_expr().in_(selected_categories))
+        if alcance:
+            query = query.filter(_envio_alcance_expr() == alcance)
         return query
 
     daily_query = _envio_base_query(
@@ -2516,7 +2705,36 @@ def alerta_comercial_detail_view(
         }
         for row in daily_rows
     ])
-    competitor_daily_rows = [row for row in daily_rows if row.canal == canal]
+    airing_query = _envio_base_query(
+        db,
+        Cronograma.fecha,
+        Cronograma.hora_inicio,
+        func.sum(Cronograma.duracion).label("duracion_total"),
+    )
+    airing_rows = (
+        apply_detail_filters(airing_query)
+        .filter(
+            Cronograma.canal == canal,
+            Cronograma.fecha.isnot(None),
+        )
+        .group_by(Cronograma.fecha, Cronograma.hora_inicio)
+        .order_by(Cronograma.fecha.asc(), Cronograma.hora_inicio.asc())
+        .all()
+    )
+    airing_rows = [
+        {
+            "fecha": row.fecha,
+            "hora_inicio": row.hora_inicio or "—",
+            "duracion_total": int(row.duracion_total or 0),
+            "mes": f"{MONTH_LABELS[row.fecha.month]} {row.fecha.year}",
+        }
+        for row in airing_rows
+    ]
+    month_totals: dict[str, int] = defaultdict(int)
+    for row in airing_rows:
+        month_totals[str(row["mes"])] += int(row["duracion_total"])
+    for row in airing_rows:
+        row["mes_duracion_total"] = month_totals[str(row["mes"])]
     product_query = _envio_base_query(
         db,
         Cronograma.producto,
@@ -2538,7 +2756,7 @@ def alerta_comercial_detail_view(
             "anunciante": anunciante,
             "canal": canal,
             "line_chart": line_chart,
-            "daily_rows": competitor_daily_rows,
+            "airing_rows": airing_rows,
             "product_rows": product_rows,
         },
     )
@@ -2552,9 +2770,13 @@ def _get_commercial_alert_rows(
     categories: list[str],
 ) -> list[dict[str, object]]:
     advertiser_expr = _envio_anunciante_expr().label("anunciante")
+    alcance_expr = _envio_alcance_expr().label("alcance")
+    categoria_expr = _envio_categoria_expr().label("categoria")
     query = _envio_base_query(
         db,
         advertiser_expr,
+        alcance_expr,
+        categoria_expr,
         Cronograma.canal,
         func.sum(Cronograma.duracion).label("duracion_total"),
     )
@@ -2566,23 +2788,25 @@ def _get_commercial_alert_rows(
         query = query.filter(_envio_categoria_expr().in_(categories))
     grouped_rows = (
         query.filter(Cronograma.canal.isnot(None))
-        .group_by(advertiser_expr, Cronograma.canal)
+        .group_by(advertiser_expr, alcance_expr, categoria_expr, Cronograma.canal)
         .all()
     )
 
-    seconds_by_advertiser: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    seconds_by_advertiser: dict[tuple[str, str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
     channel_labels: dict[str, str] = {}
     for row in grouped_rows:
         advertiser = str(row.anunciante or "Sin anunciante").strip()
+        alcance = str(row.alcance or "Sin alcance").strip()
+        categoria = str(row.categoria or "Sin categoría").strip()
         channel = str(row.canal or "").strip()
         channel_key = _normalize_match_text(channel)
         if not channel_key:
             continue
-        seconds_by_advertiser[advertiser][channel_key] += int(row.duracion_total or 0)
+        seconds_by_advertiser[(alcance, categoria, advertiser)][channel_key] += int(row.duracion_total or 0)
         channel_labels.setdefault(channel_key, channel)
 
     alert_rows: list[dict[str, object]] = []
-    for advertiser, channel_seconds in seconds_by_advertiser.items():
+    for (alcance, categoria, advertiser), channel_seconds in seconds_by_advertiser.items():
         canal_12_seconds = channel_seconds.get("CANAL 12", 0)
         for channel_key, competitor_seconds in channel_seconds.items():
             if channel_key == "CANAL 12" or competitor_seconds <= canal_12_seconds:
@@ -2591,6 +2815,8 @@ def _get_commercial_alert_rows(
             percentage = difference / canal_12_seconds * 100 if canal_12_seconds else None
             alert_rows.append({
                 "anunciante": advertiser,
+                "alcance": alcance,
+                "categoria": categoria,
                 "canal_12_seconds": canal_12_seconds,
                 "competitor": channel_labels[channel_key],
                 "competitor_seconds": competitor_seconds,
@@ -2598,10 +2824,56 @@ def _get_commercial_alert_rows(
                 "difference_percentage": percentage,
                 "critical": canal_12_seconds == 0 or percentage >= 50,
             })
-    return sorted(
+    alert_rows = sorted(
         alert_rows,
-        key=lambda item: (0 if item["critical"] else 1, -int(item["difference"])),
+        key=lambda item: (
+            _normalize_match_text(item["alcance"]),
+            _normalize_match_text(item["categoria"]),
+            0 if item["critical"] else 1,
+            -int(item["difference"]),
+        ),
     )
+    group_totals: dict[tuple[str, str], dict[str, object]] = {}
+    alcance_totals: dict[str, dict[str, object]] = {}
+    for row in alert_rows:
+        group_key = (str(row["alcance"]), str(row["categoria"]))
+        totals = group_totals.setdefault(
+            group_key,
+            {"competitor_seconds": 0, "canal_12_by_advertiser": {}},
+        )
+        totals["competitor_seconds"] = int(totals["competitor_seconds"]) + int(
+            row["competitor_seconds"]
+        )
+        totals["canal_12_by_advertiser"][str(row["anunciante"])] = int(
+            row["canal_12_seconds"]
+        )
+        alcance = str(row["alcance"])
+        scope_totals = alcance_totals.setdefault(
+            alcance,
+            {"competitor_seconds": 0, "canal_12_by_advertiser": {}},
+        )
+        scope_totals["competitor_seconds"] = int(scope_totals["competitor_seconds"]) + int(
+            row["competitor_seconds"]
+        )
+        scope_totals["canal_12_by_advertiser"][str(row["anunciante"])] = int(
+            row["canal_12_seconds"]
+        )
+
+    for row in alert_rows:
+        totals = group_totals[(str(row["alcance"]), str(row["categoria"]))]
+        canal_12_total = sum(totals["canal_12_by_advertiser"].values())
+        competitor_total = int(totals["competitor_seconds"])
+        row["group_canal_12_seconds"] = canal_12_total
+        row["group_competitor_seconds"] = competitor_total
+        row["group_difference"] = competitor_total - canal_12_total
+        scope_totals = alcance_totals[str(row["alcance"])]
+        scope_canal_12_total = sum(scope_totals["canal_12_by_advertiser"].values())
+        scope_competitor_total = int(scope_totals["competitor_seconds"])
+        row["scope_canal_12_seconds"] = scope_canal_12_total
+        row["scope_competitor_seconds"] = scope_competitor_total
+        row["scope_difference"] = scope_competitor_total - scope_canal_12_total
+
+    return alert_rows
 
 
 @router.get("/exportaciones", response_class=HTMLResponse)
@@ -3606,6 +3878,30 @@ def _get_envio_filter_options(db: Session) -> dict[str, object]:
     categoria_expr = _clean_sql_text(BaseAnunciante.categoria)
     tipo_dia_expr = _envio_tipo_dia_expr()
 
+    advertiser_rows = (
+        db.query(
+            BaseAnunciante.anunciante,
+            alcance_expr.label("alcance"),
+            categoria_expr.label("categoria"),
+        )
+        .filter(BaseAnunciante.anunciante.isnot(None))
+        .order_by(BaseAnunciante.anunciante.asc())
+        .all()
+    )
+    advertiser_metadata: dict[str, dict[str, set[str]]] = {}
+    for row in advertiser_rows:
+        advertiser = str(row.anunciante or "").strip()
+        if not advertiser:
+            continue
+        metadata = advertiser_metadata.setdefault(
+            advertiser,
+            {"alcances": set(), "categorias": set()},
+        )
+        if row.alcance:
+            metadata["alcances"].add(str(row.alcance).strip())
+        if row.categoria:
+            metadata["categorias"].add(str(row.categoria).strip())
+
     return {
         "alcances": _clean_multi_values(
             [
@@ -3627,16 +3923,14 @@ def _get_envio_filter_options(db: Session) -> dict[str, object]:
                 .all()
             ]
         ),
-        "anunciantes": _clean_multi_values(
-            [
-                row[0]
-                for row in db.query(BaseAnunciante.anunciante)
-                .filter(BaseAnunciante.anunciante.isnot(None))
-                .distinct()
-                .order_by(BaseAnunciante.anunciante.asc())
-                .all()
-            ]
-        ),
+        "anunciantes": list(advertiser_metadata),
+        "anunciante_metadata": {
+            advertiser: {
+                "alcances": sorted(values["alcances"]),
+                "categorias": sorted(values["categorias"]),
+            }
+            for advertiser, values in advertiser_metadata.items()
+        },
         "tipos_dia": _clean_multi_values(
             [
                 row[0]
@@ -3655,6 +3949,14 @@ def _get_envio_filter_options(db: Session) -> dict[str, object]:
             .order_by(Cronograma.prom_canal.asc())
             .all()
         ],
+        "canales": _clean_multi_values([
+            row[0]
+            for row in db.query(Cronograma.canal)
+            .filter(Cronograma.canal.isnot(None))
+            .distinct()
+            .order_by(Cronograma.canal.asc())
+            .all()
+        ]),
     }
 
 

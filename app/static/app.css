@@ -565,6 +565,55 @@ body {
   cursor: pointer;
 }
 
+.alert-group-row td {
+  font-weight: 800;
+}
+
+.alert-group-row {
+  cursor: pointer;
+}
+
+.alert-group-row:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.alert-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.alert-group-row--scope td {
+  padding: 16px 14px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 17px;
+}
+
+.alert-group-row--category td {
+  padding: 13px 24px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 14px;
+}
+
+.alert-group-totals {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-left: 24px;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.alert-group-totals--scope {
+  color: #1e3a8a;
+  font-size: 14px;
+}
+
 .alert-row:hover td,
 .alert-row[aria-expanded="true"] td {
   background: #eff6ff;
@@ -638,6 +687,147 @@ body {
 .alert-detail-products .table-wrap {
   max-height: 300px;
   overflow: auto;
+}
+
+.alert-detail-month td {
+  padding: 9px 12px !important;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.alert-detail-month {
+  cursor: pointer;
+}
+
+.alert-detail-month:hover td {
+  background: #bfdbfe;
+}
+
+.alert-detail-month:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.alert-detail-month i {
+  margin-right: 6px;
+}
+
+.alert-detail-month-total {
+  float: right;
+  color: #1e3a8a;
+  font-size: 12px;
+}
+
+.comparison-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(140px, 1fr)) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.comparison-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.comparison-periods span {
+  padding: 8px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-size: 12px;
+}
+
+.comparison-table th:not(:first-child),
+.comparison-table td:not(:first-child) {
+  text-align: right;
+}
+
+.comparison-panel-header,
+.comparison-panel-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.comparison-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.comparison-heading-groups th {
+  text-align: center !important;
+  font-size: 12px;
+}
+
+.comparison-group-current {
+  background: #eff6ff !important;
+}
+
+.comparison-group-previous,
+.comparison-cell-previous {
+  background: #f0fdfa !important;
+}
+
+.comparison-group-year,
+.comparison-cell-year {
+  background: #faf5ff !important;
+}
+
+.comparison-period-start {
+  border-left: 2px solid #94a3b8 !important;
+}
+
+.comparison-drill-row {
+  cursor: pointer;
+}
+
+.comparison-drill-row:hover td {
+  background: #e0f2fe !important;
+}
+
+.comparison-drill-row:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.comparison-drill-label {
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.comparison-delta.is-positive {
+  color: #15803d;
+  font-weight: 800;
+}
+
+.comparison-delta.is-negative {
+  color: #dc2626;
+  font-weight: 800;
+}
+
+@media (max-width: 900px) {
+  .comparison-filter-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .comparison-filter-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 820px) {

@@ -92,8 +92,40 @@
           </tr>
         </thead>
         <tbody>
+          {% set grouping = namespace(alcance=None, categoria=None, scope_index=0, category_index=0, scope_id='', category_id='') %}
           {% for row in alert_rows %}
-          <tr class="alert-row" tabindex="0" role="button" aria-expanded="false" data-alert-row data-anunciante="{{ row.anunciante }}" data-canal="{{ row.competitor }}">
+          {% if grouping.alcance != row.alcance %}
+          {% set grouping.scope_index = grouping.scope_index + 1 %}
+          {% set grouping.scope_id = 'alert-scope-' ~ grouping.scope_index %}
+          <tr class="alert-group-row alert-group-row--scope" tabindex="0" role="button" aria-expanded="true" data-alert-scope-toggle="{{ grouping.scope_id }}">
+            <td colspan="7">
+              <span class="alert-group-title"><i class="bi bi-chevron-down" aria-hidden="true"></i> Alcance: {{ row.alcance }}</span>
+              <span class="alert-group-totals alert-group-totals--scope">
+                Canal 12: {{ "{:,}".format(row.scope_canal_12_seconds).replace(",", ".") }} s
+                · Competidores: {{ "{:,}".format(row.scope_competitor_seconds).replace(",", ".") }} s
+                · Diferencia: +{{ "{:,}".format(row.scope_difference).replace(",", ".") }} s
+              </span>
+            </td>
+          </tr>
+          {% set grouping.alcance = row.alcance %}
+          {% set grouping.categoria = None %}
+          {% endif %}
+          {% if grouping.categoria != row.categoria %}
+          {% set grouping.category_index = grouping.category_index + 1 %}
+          {% set grouping.category_id = 'alert-category-' ~ grouping.category_index %}
+          <tr class="alert-group-row alert-group-row--category" tabindex="0" role="button" aria-expanded="false" data-alert-category-toggle="{{ grouping.category_id }}" data-alert-scope-child="{{ grouping.scope_id }}">
+            <td colspan="7">
+              <span class="alert-group-title"><i class="bi bi-chevron-right" aria-hidden="true"></i> Categoría: {{ row.categoria }}</span>
+              <span class="alert-group-totals">
+                Canal 12: {{ "{:,}".format(row.group_canal_12_seconds).replace(",", ".") }} s
+                · Competidores: {{ "{:,}".format(row.group_competitor_seconds).replace(",", ".") }} s
+                · Diferencia: +{{ "{:,}".format(row.group_difference).replace(",", ".") }} s
+              </span>
+            </td>
+          </tr>
+          {% set grouping.categoria = row.categoria %}
+          {% endif %}
+          <tr class="alert-row" tabindex="0" role="button" aria-expanded="false" data-alert-row data-alert-category-child="{{ grouping.category_id }}" data-anunciante="{{ row.anunciante }}" data-canal="{{ row.competitor }}" data-alcance="{{ row.alcance }}" data-categoria="{{ row.categoria }}" hidden>
             <td><span class="alert-badge {% if row.critical %}is-critical{% else %}is-warning{% endif %}">{% if row.critical %}Crítica{% else %}Atención{% endif %}</span></td>
             <td><strong>{{ row.anunciante }}</strong></td>
             <td>{{ "{:,}".format(row.canal_12_seconds).replace(",", ".") }} s</td>
@@ -102,7 +134,7 @@
             <td class="alert-difference">+{{ "{:,}".format(row.difference).replace(",", ".") }} s</td>
             <td>{% if row.difference_percentage is not none %}+{{ "%.1f"|format(row.difference_percentage) }}%{% else %}Sin pauta en C12{% endif %}</td>
           </tr>
-          <tr class="alert-detail-row" data-alert-detail hidden>
+          <tr class="alert-detail-row" data-alert-detail data-alert-category-child="{{ grouping.category_id }}" hidden>
             <td colspan="7"><div class="alert-detail-content"></div></td>
           </tr>
           {% else %}
@@ -182,6 +214,9 @@
       if (dateTo) params.set("fecha_hasta", dateTo);
       params.set("anunciante", row.dataset.anunciante || "");
       params.set("canal", row.dataset.canal || "");
+      params.set("alcance", row.dataset.alcance || "");
+      params.delete("categoria");
+      params.append("categoria", row.dataset.categoria || "");
       try {
         const response = await fetch(`/alertas-comerciales/detalle?${params.toString()}`);
         if (!response.ok) throw new Error("No se pudo cargar el detalle");
@@ -200,13 +235,84 @@
     });
   });
 
+  function toggleCategory(header, forceOpen = null) {
+    const categoryId = header.dataset.alertCategoryToggle;
+    const isOpen = forceOpen === null ? header.getAttribute("aria-expanded") !== "true" : forceOpen;
+    header.setAttribute("aria-expanded", String(isOpen));
+    const icon = header.querySelector(".alert-group-title i");
+    if (icon) icon.className = `bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"}`;
+    document.querySelectorAll(`[data-alert-category-child="${categoryId}"]`).forEach((child) => {
+      if (child.matches("[data-alert-detail]")) {
+        child.hidden = true;
+      } else {
+        child.hidden = !isOpen;
+        child.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
+  document.querySelectorAll("[data-alert-category-toggle]").forEach((header) => {
+    const toggle = () => toggleCategory(header);
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggle();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-alert-scope-toggle]").forEach((header) => {
+    const toggle = () => {
+      const scopeId = header.dataset.alertScopeToggle;
+      const isOpen = header.getAttribute("aria-expanded") !== "true";
+      header.setAttribute("aria-expanded", String(isOpen));
+      const icon = header.querySelector(".alert-group-title i");
+      if (icon) icon.className = `bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"}`;
+      document.querySelectorAll(`[data-alert-scope-child="${scopeId}"]`).forEach((categoryHeader) => {
+        categoryHeader.hidden = !isOpen;
+        if (!isOpen) toggleCategory(categoryHeader, false);
+      });
+    };
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggle();
+      }
+    });
+  });
+
   document.querySelector("[data-collapse-alerts]")?.addEventListener("click", () => {
-    document.querySelectorAll("[data-alert-detail]").forEach((detailRow) => {
-      detailRow.hidden = true;
+    document.querySelectorAll("[data-alert-category-toggle]").forEach((header) => {
+      toggleCategory(header, false);
     });
-    document.querySelectorAll("[data-alert-row]").forEach((row) => {
-      row.setAttribute("aria-expanded", "false");
+  });
+
+  function toggleDetailMonth(header) {
+    const monthId = header.dataset.alertMonthToggle;
+    const detailContent = header.closest(".alert-detail-content");
+    if (!monthId || !detailContent) return;
+    const isOpen = header.getAttribute("aria-expanded") !== "true";
+    header.setAttribute("aria-expanded", String(isOpen));
+    const icon = header.querySelector("i");
+    if (icon) icon.className = `bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"}`;
+    detailContent.querySelectorAll(`[data-alert-month-child="${monthId}"]`).forEach((row) => {
+      row.hidden = !isOpen;
     });
+  }
+
+  document.addEventListener("click", (event) => {
+    const header = event.target.closest("[data-alert-month-toggle]");
+    if (header) toggleDetailMonth(header);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const header = event.target.closest("[data-alert-month-toggle]");
+    if (header && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      toggleDetailMonth(header);
+    }
   });
 </script>
 {% endblock %}

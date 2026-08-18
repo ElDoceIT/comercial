@@ -2,7 +2,7 @@
 
 {% block title %}Envío Monitor | Monitor Pautas{% endblock %}
 
-{% macro multi_filter(name, label, options, selected_values) %}
+{% macro multi_filter(name, label, options, selected_values, option_metadata=None) %}
 <div class="field multi-filter-field" data-multi-dropdown data-filter-name="{{ name }}">
   <span class="field-label">{{ label }}</span>
   <button class="input multi-dropdown-button" type="button" data-dropdown-toggle aria-expanded="false">
@@ -14,7 +14,8 @@
     <input class="input input--compact multi-dropdown-search" type="search" placeholder="Buscar">
     <div class="multi-dropdown-options" data-multi-filter="{{ name }}">
       {% for item in options %}
-      <label class="multi-dropdown-option">
+      {% set metadata = option_metadata.get(item, {}) if option_metadata else {} %}
+      <label class="multi-dropdown-option"{% if option_metadata %} data-option-alcances='{{ metadata.get("alcances", [])|tojson }}' data-option-categorias='{{ metadata.get("categorias", [])|tojson }}'{% endif %}>
         <input type="checkbox" name="{{ name }}" value="{{ item }}" {% if not selected_values or item in selected_values %}checked{% endif %}>
         <span>{{ item }}</span>
       </label>
@@ -57,7 +58,7 @@
 
       {{ multi_filter("alcance", "Alcance", filter_options.alcances, filters.alcances) }}
       {{ multi_filter("categoria", "Categoría", filter_options.categorias, filters.categorias) }}
-      {{ multi_filter("anunciante", "Anunciante", filter_options.anunciantes, filters.anunciantes) }}
+      {{ multi_filter("anunciante", "Anunciante", filter_options.anunciantes, filters.anunciantes, filter_options.anunciante_metadata) }}
       {{ multi_filter("tipo_dia", "Tipo día", filter_options.tipos_dia, filters.tipos_dia) }}
 
       <div class="filter-actions">
@@ -346,6 +347,9 @@
       checkbox.addEventListener("change", () => {
         updateDropdownLabel(dropdown);
         updateToggleAllButton(dropdown);
+        if (["alcance", "categoria"].includes(dropdown.dataset.filterName)) {
+          updateAdvertiserOptions();
+        }
       });
     });
 
@@ -363,8 +367,43 @@
     const normalizedQuery = normalizeFilterText(query.trim());
     dropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => {
       const optionText = normalizeFilterText(option.textContent || "");
-      option.hidden = normalizedQuery && !optionText.includes(normalizedQuery);
+      const hiddenByDependency = option.dataset.dependencyHidden === "true";
+      option.hidden = hiddenByDependency || (normalizedQuery && !optionText.includes(normalizedQuery));
     });
+  }
+
+  function selectedDependencyValues(filterName) {
+    const dropdown = document.querySelector(`[data-filter-name="${filterName}"]`);
+    if (!dropdown) return null;
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const selected = checks.filter((checkbox) => checkbox.checked).map((checkbox) => checkbox.value);
+    return selected.length && selected.length < checks.length ? new Set(selected) : null;
+  }
+
+  function updateAdvertiserOptions() {
+    const dropdown = document.querySelector('[data-filter-name="anunciante"]');
+    if (!dropdown) return;
+    const selectedScopes = selectedDependencyValues("alcance");
+    const selectedCategories = selectedDependencyValues("categoria");
+
+    dropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => {
+      const scopes = JSON.parse(option.dataset.optionAlcances || "[]");
+      const categories = JSON.parse(option.dataset.optionCategorias || "[]");
+      const matchesScope = !selectedScopes || scopes.some((value) => selectedScopes.has(value));
+      const matchesCategory = !selectedCategories || categories.some((value) => selectedCategories.has(value));
+      const isAvailable = matchesScope && matchesCategory;
+      option.dataset.dependencyHidden = String(!isAvailable);
+      const checkbox = option.querySelector('input[type="checkbox"]');
+      if (checkbox) {
+        checkbox.disabled = !isAvailable;
+        if (!isAvailable) checkbox.checked = false;
+      }
+    });
+
+    const search = dropdown.querySelector(".multi-dropdown-search");
+    filterDropdownOptions(dropdown, search?.value || "");
+    updateDropdownLabel(dropdown);
+    updateToggleAllButton(dropdown);
   }
 
   document.querySelectorAll(".multi-dropdown-search").forEach((search) => {
@@ -386,7 +425,7 @@
 
   function updateToggleAllButton(dropdown) {
     const button = dropdown.querySelector("[data-toggle-all]");
-    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]')).filter((checkbox) => !checkbox.disabled);
     const allSelected = checks.length > 0 && checks.every((checkbox) => checkbox.checked);
     if (button) button.textContent = allSelected ? "Deseleccionar todas" : "Seleccionar todas";
   }
@@ -396,7 +435,7 @@
       const dropdown = button.closest("[data-multi-dropdown]");
       const options = dropdown ? dropdown.querySelector("[data-multi-filter]") : null;
       if (!options) return;
-      const checks = Array.from(options.querySelectorAll('input[type="checkbox"]'));
+      const checks = Array.from(options.querySelectorAll('input[type="checkbox"]')).filter((checkbox) => !checkbox.disabled);
       const shouldSelect = !checks.every((checkbox) => checkbox.checked);
       checks.forEach((checkbox) => {
         checkbox.checked = shouldSelect;
@@ -404,18 +443,24 @@
       if (dropdown) {
         updateDropdownLabel(dropdown);
         updateToggleAllButton(dropdown);
+        if (["alcance", "categoria"].includes(dropdown.dataset.filterName)) {
+          updateAdvertiserOptions();
+        }
       }
     });
   });
+
+  updateAdvertiserOptions();
 
   document.querySelector('.dashboard-filters form')?.addEventListener("submit", () => {
     document.querySelectorAll("[data-multi-dropdown]").forEach((dropdown) => {
       const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
       if (!checks.length) return;
 
-      const allSelected = checks.every((checkbox) => checkbox.checked);
+      const enabledChecks = checks.filter((checkbox) => !checkbox.disabled);
+      const allSelected = enabledChecks.length > 0 && enabledChecks.every((checkbox) => checkbox.checked);
       if (allSelected) {
-        checks.forEach((checkbox) => {
+        enabledChecks.forEach((checkbox) => {
           checkbox.disabled = true;
         });
       }

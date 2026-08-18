@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Comparativos | Envío Monitor{% endblock %}
+
+{% macro multi_filter(name, label, options, selected_values) %}
+<div class="field multi-filter-field" data-comparison-dropdown>
+  <span class="field-label">{{ label }}</span>
+  <button class="input multi-dropdown-button" type="button" data-dropdown-toggle aria-expanded="false"><span data-dropdown-label>Todos</span><span aria-hidden="true">▾</span></button>
+  <div class="multi-dropdown-menu" data-dropdown-menu hidden>
+    <button class="button button-secondary select-all-button" type="button" data-toggle-all>Seleccionar todas</button>
+    <input class="input input--compact multi-dropdown-search" type="search" placeholder="Buscar">
+    <div class="multi-dropdown-options">
+      {% for item in options %}
+      <label class="multi-dropdown-option"><input type="checkbox" name="{{ name }}" value="{{ item }}" {% if not selected_values or item in selected_values %}checked{% endif %}><span>{{ item }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro comparison_table(title, rows, table_key, collapsed=False) %}
+<article class="panel comparison-panel" data-comparison-panel="{{ table_key }}">
+  <div class="panel-header comparison-panel-header">
+    <button class="comparison-panel-toggle" type="button" data-comparison-panel-toggle aria-expanded="{{ 'false' if collapsed else 'true' }}"><i class="bi {{ 'bi-chevron-right' if collapsed else 'bi-chevron-down' }}" aria-hidden="true"></i><span class="panel-title">{{ title }}</span></button>
+    <div class="comparison-panel-meta"><span class="comparison-drill-label" data-comparison-drill-label hidden></span><button class="button button-small button-secondary" type="button" data-clear-comparison-drill hidden>Ver todos</button><span class="panel-meta">{{ rows|length }}</span></div>
+  </div>
+  <div class="table-wrap" data-comparison-panel-content {% if collapsed %}hidden{% endif %}>
+    <table class="data-table comparison-table">
+      <thead>
+        <tr class="comparison-heading-groups"><th rowspan="2">{{ title[:-1] }}</th><th colspan="2" class="comparison-group-current">Período actual</th><th colspan="2" class="comparison-group-previous">Mes anterior</th><th colspan="2" class="comparison-group-year">Año anterior</th></tr>
+        <tr><th class="comparison-group-current">Segundos</th><th class="comparison-group-current">Share</th><th class="comparison-group-previous comparison-period-start">Share</th><th class="comparison-group-previous">Variación</th><th class="comparison-group-year comparison-period-start">Share</th><th class="comparison-group-year">Variación</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr{% if table_key in ["alcances", "categorias"] %} class="comparison-drill-row" tabindex="0" role="button" data-comparison-drill-type="{{ 'alcance' if table_key == 'alcances' else 'categoria' }}" data-comparison-drill-value="{{ row.label }}"{% elif table_key == "anunciantes" %} data-comparison-advertiser-row data-option-alcances='{{ row.alcances|tojson }}' data-option-categorias='{{ row.categorias|tojson }}'{% endif %}>
+          <td><strong>{{ row.label }}</strong></td>
+          <td>{{ "{:,}".format(row.actual_seconds).replace(",", ".") }} s</td>
+          <td>{{ "%.2f%%"|format(row.actual_share) if row.actual_share is not none else "Sin datos" }}</td>
+          <td class="comparison-period-start comparison-cell-previous">{{ "%.2f%%"|format(row.previous_share) if row.previous_share is not none else "Sin datos" }}</td>
+          <td class="comparison-delta comparison-cell-previous {% if row.previous_delta is not none and row.previous_delta > 0 %}is-positive{% elif row.previous_delta is not none and row.previous_delta < 0 %}is-negative{% endif %}">{{ "%+.2f pp"|format(row.previous_delta) if row.previous_delta is not none else "—" }}</td>
+          <td class="comparison-period-start comparison-cell-year">{{ "%.2f%%"|format(row.year_share) if row.year_share is not none else "Sin datos" }}</td>
+          <td class="comparison-delta comparison-cell-year {% if row.year_delta is not none and row.year_delta > 0 %}is-positive{% elif row.year_delta is not none and row.year_delta < 0 %}is-negative{% endif %}">{{ "%+.2f pp"|format(row.year_delta) if row.year_delta is not none else "—" }}</td>
+        </tr>
+        {% else %}<tr><td colspan="7" class="empty-state">No hay datos para comparar.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
+{% endmacro %}
+
+{% block content %}
+<section class="dashboard-shell">
+  <header class="dashboard-header"><div class="dashboard-title-block"><p class="eyebrow">Envío Monitor</p><h1 class="dashboard-title">Comparativo de participación</h1><p class="page-subtitle">Share del período actual frente al mes anterior y al mismo período del año anterior.</p></div></header>
+
+  <section class="panel panel--tight">
+    <form method="get" action="/comparativos" class="comparison-filter-grid">
+      <label class="field"><span class="field-label">Mes</span><input class="input" type="month" name="mes" value="{{ filters.mes }}" max="{{ max_month }}"></label>
+      {{ multi_filter("canal", "Canal", options.canales, filters.canales) }}
+      {{ multi_filter("alcance", "Alcance", options.alcances, filters.alcances) }}
+      {{ multi_filter("categoria", "Categoría", options.categorias, filters.categorias) }}
+      {{ multi_filter("anunciante", "Anunciante", options.anunciantes, filters.anunciantes) }}
+      <div class="filter-actions"><button class="button" type="submit">Comparar</button><a class="button button-secondary" href="/comparativos">Limpiar</a></div>
+    </form>
+  </section>
+
+  <section class="comparison-periods">
+    <span><strong>Actual:</strong> {{ period_labels.actual }}</span>
+    <span><strong>Mes anterior:</strong> {{ period_labels.anterior }}</span>
+    <span><strong>Año anterior:</strong> {{ period_labels.anual }}</span>
+  </section>
+
+  {{ comparison_table("Alcances", tables.alcances, "alcances") }}
+  {{ comparison_table("Categorías", tables.categorias, "categorias") }}
+  {{ comparison_table("Anunciantes", tables.anunciantes, "anunciantes", True) }}
+</section>
+
+<script>
+  function updateComparisonLabel(dropdown) {
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const selected = checks.filter((check) => check.checked);
+    const label = dropdown.querySelector("[data-dropdown-label]");
+    if (!label) return;
+    label.textContent = selected.length === checks.length ? "Todos" : selected.length === 1 ? selected[0].value : `${selected.length} seleccionados`;
+  }
+
+  document.querySelectorAll("[data-comparison-dropdown]").forEach((dropdown) => {
+    const toggle = dropdown.querySelector("[data-dropdown-toggle]");
+    const menu = dropdown.querySelector("[data-dropdown-menu]");
+    const search = dropdown.querySelector(".multi-dropdown-search");
+    const allButton = dropdown.querySelector("[data-toggle-all]");
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const updateAll = () => {
+      updateComparisonLabel(dropdown);
+      allButton.textContent = checks.every((check) => check.checked) ? "Deseleccionar todas" : "Seleccionar todas";
+    };
+    updateAll();
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
+      toggle.setAttribute("aria-expanded", String(!menu.hidden));
+      if (!menu.hidden) search.focus();
+    });
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    checks.forEach((check) => check.addEventListener("change", updateAll));
+    allButton.addEventListener("click", () => {
+      const select = !checks.every((check) => check.checked);
+      checks.forEach((check) => { check.checked = select; });
+      updateAll();
+    });
+    search.addEventListener("input", () => {
+      const query = search.value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      dropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => {
+        const text = option.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        option.hidden = query && !text.includes(query);
+      });
+    });
+  });
+
+  document.addEventListener("click", () => {
+    document.querySelectorAll("[data-comparison-dropdown]").forEach((dropdown) => {
+      dropdown.querySelector("[data-dropdown-menu]").hidden = true;
+      dropdown.querySelector("[data-dropdown-toggle]").setAttribute("aria-expanded", "false");
+    });
+  });
+
+  document.querySelector(".comparison-filter-grid")?.addEventListener("submit", () => {
+    document.querySelectorAll("[data-comparison-dropdown]").forEach((dropdown) => {
+      const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+      if (checks.length && checks.every((check) => check.checked)) checks.forEach((check) => { check.disabled = true; });
+    });
+  });
+
+  function setComparisonPanel(panel, isOpen) {
+    const content = panel.querySelector("[data-comparison-panel-content]");
+    const toggle = panel.querySelector("[data-comparison-panel-toggle]");
+    if (!content || !toggle) return;
+    content.hidden = !isOpen;
+    toggle.setAttribute("aria-expanded", String(isOpen));
+    const icon = toggle.querySelector("i");
+    if (icon) icon.className = `bi ${isOpen ? "bi-chevron-down" : "bi-chevron-right"}`;
+  }
+
+  document.querySelectorAll("[data-comparison-panel]").forEach((panel) => {
+    panel.querySelector("[data-comparison-panel-toggle]")?.addEventListener("click", () => {
+      const isOpen = panel.querySelector("[data-comparison-panel-toggle]").getAttribute("aria-expanded") !== "true";
+      setComparisonPanel(panel, isOpen);
+    });
+  });
+
+  const advertiserPanel = document.querySelector('[data-comparison-panel="anunciantes"]');
+  function filterComparisonAdvertisers(type = null, value = null) {
+    if (!advertiserPanel) return;
+    let visible = 0;
+    advertiserPanel.querySelectorAll("[data-comparison-advertiser-row]").forEach((row) => {
+      const values = type === "alcance"
+        ? JSON.parse(row.dataset.optionAlcances || "[]")
+        : JSON.parse(row.dataset.optionCategorias || "[]");
+      const matches = !type || values.includes(value);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    const label = advertiserPanel.querySelector("[data-comparison-drill-label]");
+    const clear = advertiserPanel.querySelector("[data-clear-comparison-drill]");
+    if (label) {
+      label.hidden = !type;
+      label.textContent = type ? `${type === "alcance" ? "Alcance" : "Categoría"}: ${value}` : "";
+    }
+    if (clear) clear.hidden = !type;
+    const count = advertiserPanel.querySelector(".panel-meta");
+    if (count) count.textContent = String(visible);
+    setComparisonPanel(advertiserPanel, true);
+    advertiserPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  document.querySelectorAll("[data-comparison-drill-type]").forEach((row) => {
+    const drill = () => filterComparisonAdvertisers(row.dataset.comparisonDrillType, row.dataset.comparisonDrillValue);
+    row.addEventListener("click", drill);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        drill();
+      }
+    });
+  });
+
+  advertiserPanel?.querySelector("[data-clear-comparison-drill]")?.addEventListener("click", () => {
+    filterComparisonAdvertisers();
+  });
+</script>
+{% endblock %}
