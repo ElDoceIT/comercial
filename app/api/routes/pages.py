@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from xml.sax.saxutils import escape
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlencode
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -2424,6 +2424,8 @@ def comparativos_view(
     request: Request,
     db: Session = Depends(get_db),
     mes: str | None = Query(default=None),
+    mes_desde: str | None = Query(default=None),
+    mes_hasta: str | None = Query(default=None),
     alcance: list[str] | None = Query(default=None),
     categoria: list[str] | None = Query(default=None),
     anunciante: list[str] | None = Query(default=None),
@@ -2431,26 +2433,37 @@ def comparativos_view(
 ):
     max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
     reference_date = max_fecha or date.today()
-    try:
-        selected_month = datetime.strptime(mes or reference_date.strftime("%Y-%m"), "%Y-%m").date()
-    except ValueError:
-        selected_month = reference_date.replace(day=1)
-    selected_month = selected_month.replace(day=1)
+    reference_month = reference_date.replace(day=1)
 
-    selected_last_day = calendar.monthrange(selected_month.year, selected_month.month)[1]
-    if (selected_month.year, selected_month.month) == (reference_date.year, reference_date.month):
+    def parse_selected_month(value: str | None) -> date:
+        try:
+            parsed = datetime.strptime(value or "", "%Y-%m").date().replace(day=1)
+        except ValueError:
+            return reference_month
+        return min(parsed, reference_month)
+
+    legacy_month = mes or None
+    selected_start_month = parse_selected_month(mes_desde or legacy_month)
+    selected_end_month = parse_selected_month(mes_hasta or legacy_month)
+    if selected_start_month > selected_end_month:
+        selected_start_month, selected_end_month = selected_end_month, selected_start_month
+
+    selected_last_day = calendar.monthrange(selected_end_month.year, selected_end_month.month)[1]
+    if selected_end_month == reference_month:
         selected_cutoff_day = min(reference_date.day, selected_last_day)
     else:
         selected_cutoff_day = selected_last_day
-    current_end = selected_month.replace(day=selected_cutoff_day)
+    current_end = selected_end_month.replace(day=selected_cutoff_day)
+    show_previous = selected_start_month == selected_end_month
 
-    previous_month = (selected_month - timedelta(days=1)).replace(day=1)
+    previous_month = (selected_start_month - timedelta(days=1)).replace(day=1)
     previous_end = previous_month.replace(
         day=min(selected_cutoff_day, calendar.monthrange(previous_month.year, previous_month.month)[1])
     )
-    previous_year = selected_month.replace(year=selected_month.year - 1)
-    previous_year_end = previous_year.replace(
-        day=min(selected_cutoff_day, calendar.monthrange(previous_year.year, previous_year.month)[1])
+    previous_year = selected_start_month.replace(year=selected_start_month.year - 1)
+    previous_year_end_month = selected_end_month.replace(year=selected_end_month.year - 1)
+    previous_year_end = previous_year_end_month.replace(
+        day=min(selected_cutoff_day, calendar.monthrange(previous_year_end_month.year, previous_year_end_month.month)[1])
     )
 
     options = _get_envio_filter_options(db)
@@ -2459,10 +2472,11 @@ def comparativos_view(
     selected_anunciantes = _normalize_all_selected(_clean_multi_values(anunciante), options["anunciantes"])
     selected_canales = _normalize_all_selected(_clean_multi_values(canal), options["canales"])
     periods = {
-        "actual": (selected_month, current_end),
-        "anterior": (previous_month, previous_end),
+        "actual": (selected_start_month, current_end),
         "anual": (previous_year, previous_year_end),
     }
+    if show_previous:
+        periods["anterior"] = (previous_month, previous_end)
     period_rows = {
         key: _get_comparison_base_rows(
             db=db,
@@ -2494,17 +2508,19 @@ def comparativos_view(
             "tables": comparison_tables,
             "options": options,
             "filters": {
-                "mes": selected_month.strftime("%Y-%m"),
+                "mes_desde": selected_start_month.strftime("%Y-%m"),
+                "mes_hasta": selected_end_month.strftime("%Y-%m"),
                 "alcances": selected_alcances,
                 "categorias": selected_categorias,
                 "anunciantes": selected_anunciantes,
                 "canales": selected_canales,
             },
             "period_labels": {
-                "actual": f"{selected_month.strftime('%m/%Y')} (01–{current_end.day:02d})",
+                "actual": f"{selected_start_month.strftime('%m/%Y')}–{current_end.strftime('%d/%m/%Y')}",
                 "anterior": f"{previous_month.strftime('%m/%Y')} (01–{previous_end.day:02d})",
-                "anual": f"{previous_year.strftime('%m/%Y')} (01–{previous_year_end.day:02d})",
+                "anual": f"{previous_year.strftime('%m/%Y')}–{previous_year_end.strftime('%d/%m/%Y')}",
             },
+            "show_previous": show_previous,
             "max_month": reference_date.strftime("%Y-%m"),
         },
     )
@@ -2882,16 +2898,34 @@ def exportaciones_view(
     db: Session = Depends(get_db),
     fecha_desde: str | None = Query(default=None),
     fecha_hasta: str | None = Query(default=None),
+    alcance: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    anunciante: list[str] | None = Query(default=None),
 ):
     fecha_desde_value = _parse_export_date(fecha_desde)
     fecha_hasta_value = _parse_export_date(fecha_hasta)
+    options = _get_envio_filter_options(db)
+    selected_alcances = _normalize_all_selected(_clean_multi_values(alcance), options["alcances"])
+    selected_categorias = _normalize_all_selected(_clean_multi_values(categoria), options["categorias"])
+    selected_anunciantes = _normalize_all_selected(_clean_multi_values(anunciante), options["anunciantes"])
     export_count = _get_export_cronogramas_query(
         db,
         fecha_desde=fecha_desde_value,
         fecha_hasta=fecha_hasta_value,
+        alcances=selected_alcances,
+        categorias=selected_categorias,
+        anunciantes=selected_anunciantes,
     ).count()
     min_fecha = db.query(func.min(Cronograma.fecha)).scalar()
     max_fecha = db.query(func.max(Cronograma.fecha)).scalar()
+    export_query_params: list[tuple[str, str]] = []
+    if fecha_desde:
+        export_query_params.append(("fecha_desde", fecha_desde))
+    if fecha_hasta:
+        export_query_params.append(("fecha_hasta", fecha_hasta))
+    export_query_params.extend(("alcance", value) for value in selected_alcances)
+    export_query_params.extend(("categoria", value) for value in selected_categorias)
+    export_query_params.extend(("anunciante", value) for value in selected_anunciantes)
 
     return templates.TemplateResponse(
         request,
@@ -2902,6 +2936,13 @@ def exportaciones_view(
             "min_fecha": min_fecha,
             "max_fecha": max_fecha,
             "export_count": export_count,
+            "options": options,
+            "filters": {
+                "alcances": selected_alcances,
+                "categorias": selected_categorias,
+                "anunciantes": selected_anunciantes,
+            },
+            "export_query": urlencode(export_query_params),
         },
     )
 
@@ -2913,6 +2954,9 @@ def export_cronogramas(
     fecha_hasta: str | None = Query(default=None),
     formato: str = Query(default="csv"),
     tipo: str = Query(default="simple"),
+    alcance: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    anunciante: list[str] | None = Query(default=None),
 ) -> Response:
     fecha_desde_value = _parse_export_date(fecha_desde)
     fecha_hasta_value = _parse_export_date(fecha_hasta)
@@ -2922,6 +2966,9 @@ def export_cronogramas(
             db,
             fecha_desde=fecha_desde_value,
             fecha_hasta=fecha_hasta_value,
+            alcances=_clean_multi_values(alcance),
+            categorias=_clean_multi_values(categoria),
+            anunciantes=_clean_multi_values(anunciante),
         )
     else:
         columns = EXPORT_CRONOGRAMAS_COLUMNS
@@ -2929,6 +2976,9 @@ def export_cronogramas(
             db,
             fecha_desde=fecha_desde_value,
             fecha_hasta=fecha_hasta_value,
+            alcances=_clean_multi_values(alcance),
+            categorias=_clean_multi_values(categoria),
+            anunciantes=_clean_multi_values(anunciante),
         )
     file_stem = _build_export_file_stem(
         fecha_desde=fecha_desde_value,
@@ -3047,12 +3097,21 @@ def _get_export_cronogramas_query(
     *,
     fecha_desde: date | None,
     fecha_hasta: date | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
 ):
-    query = db.query(Cronograma)
+    query = _envio_base_query(db, Cronograma)
     if fecha_desde is not None:
         query = query.filter(Cronograma.fecha >= fecha_desde)
     if fecha_hasta is not None:
         query = query.filter(Cronograma.fecha <= fecha_hasta)
+    if alcances:
+        query = query.filter(_envio_alcance_expr().in_(alcances))
+    if categorias:
+        query = query.filter(_envio_categoria_expr().in_(categorias))
+    if anunciantes:
+        query = query.filter(_envio_anunciante_expr().in_(anunciantes))
 
     return query.order_by(Cronograma.fecha.asc(), Cronograma.hora_inicio.asc(), Cronograma.id.asc())
 
@@ -3062,6 +3121,9 @@ def _get_export_cronogramas_rows(
     *,
     fecha_desde: date | None,
     fecha_hasta: date | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
 ) -> list[dict[str, object]]:
     return [
         _format_export_cronograma_row(row)
@@ -3069,6 +3131,9 @@ def _get_export_cronogramas_rows(
             db,
             fecha_desde=fecha_desde,
             fecha_hasta=fecha_hasta,
+            alcances=alcances,
+            categorias=categorias,
+            anunciantes=anunciantes,
         ).all()
     ]
 
@@ -3078,6 +3143,9 @@ def _get_export_cronogramas_completa_rows(
     *,
     fecha_desde: date | None,
     fecha_hasta: date | None,
+    alcances: list[str],
+    categorias: list[str],
+    anunciantes: list[str],
 ) -> list[dict[str, object]]:
     query = (
         db.query(
@@ -3100,6 +3168,12 @@ def _get_export_cronogramas_completa_rows(
         query = query.filter(Cronograma.fecha >= fecha_desde)
     if fecha_hasta is not None:
         query = query.filter(Cronograma.fecha <= fecha_hasta)
+    if alcances:
+        query = query.filter(_envio_alcance_expr().in_(alcances))
+    if categorias:
+        query = query.filter(_envio_categoria_expr().in_(categorias))
+    if anunciantes:
+        query = query.filter(_envio_anunciante_expr().in_(anunciantes))
 
     rows = query.order_by(
         Cronograma.fecha.asc(),
@@ -4102,14 +4176,22 @@ def _build_line_chart(rows: list[dict[str, object]]) -> dict[str, object]:
         value = round(max_value * step / 4)
         y_labels.append({"value": value, "y": round(y_position(value), 2)})
 
+    if len(dates) <= 10:
+        x_label_indexes = list(range(len(dates)))
+    else:
+        x_label_indexes = sorted({
+            round(step * (len(dates) - 1) / 9)
+            for step in range(10)
+        })
+
     return {
         "series": series,
         "x_labels": [
             {
-                "label": current_date.strftime("%d/%m"),
+                "label": dates[index].strftime("%d/%m"),
                 "x": round(x_position(index), 2),
             }
-            for index, current_date in enumerate(dates)
+            for index in x_label_indexes
         ],
         "y_labels": y_labels,
         "width": width,

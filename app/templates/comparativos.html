@@ -2,7 +2,7 @@
 {% block title %}Comparativos | Envío Monitor{% endblock %}
 
 {% macro multi_filter(name, label, options, selected_values) %}
-<div class="field multi-filter-field" data-comparison-dropdown>
+<div class="field multi-filter-field{% if name == 'anunciante' %} comparison-advertiser-filter{% endif %}" data-comparison-dropdown>
   <span class="field-label">{{ label }}</span>
   <button class="input multi-dropdown-button" type="button" data-dropdown-toggle aria-expanded="false"><span data-dropdown-label>Todos</span><span aria-hidden="true">▾</span></button>
   <div class="multi-dropdown-menu" data-dropdown-menu hidden>
@@ -17,7 +17,7 @@
 </div>
 {% endmacro %}
 
-{% macro comparison_table(title, rows, table_key, collapsed=False) %}
+{% macro comparison_table(title, rows, table_key, show_previous, collapsed=False) %}
 <article class="panel comparison-panel" data-comparison-panel="{{ table_key }}">
   <div class="panel-header comparison-panel-header">
     <button class="comparison-panel-toggle" type="button" data-comparison-panel-toggle aria-expanded="{{ 'false' if collapsed else 'true' }}"><i class="bi {{ 'bi-chevron-right' if collapsed else 'bi-chevron-down' }}" aria-hidden="true"></i><span class="panel-title">{{ title }}</span></button>
@@ -26,8 +26,8 @@
   <div class="table-wrap" data-comparison-panel-content {% if collapsed %}hidden{% endif %}>
     <table class="data-table comparison-table">
       <thead>
-        <tr class="comparison-heading-groups"><th rowspan="2">{{ title[:-1] }}</th><th colspan="2" class="comparison-group-current">Período actual</th><th colspan="2" class="comparison-group-previous">Mes anterior</th><th colspan="2" class="comparison-group-year">Año anterior</th></tr>
-        <tr><th class="comparison-group-current">Segundos</th><th class="comparison-group-current">Share</th><th class="comparison-group-previous comparison-period-start">Share</th><th class="comparison-group-previous">Variación</th><th class="comparison-group-year comparison-period-start">Share</th><th class="comparison-group-year">Variación</th></tr>
+        <tr class="comparison-heading-groups"><th rowspan="2">{{ title[:-1] }}</th><th colspan="2" class="comparison-group-current">Período actual</th>{% if show_previous %}<th colspan="2" class="comparison-group-previous">Mes anterior</th>{% endif %}<th colspan="2" class="comparison-group-year">Año anterior</th></tr>
+        <tr><th class="comparison-group-current">Segundos</th><th class="comparison-group-current">Share</th>{% if show_previous %}<th class="comparison-group-previous comparison-period-start">Share</th><th class="comparison-group-previous">Variación</th>{% endif %}<th class="comparison-group-year comparison-period-start">Share</th><th class="comparison-group-year">Variación</th></tr>
       </thead>
       <tbody>
         {% for row in rows %}
@@ -35,12 +35,12 @@
           <td><strong>{{ row.label }}</strong></td>
           <td>{{ "{:,}".format(row.actual_seconds).replace(",", ".") }} s</td>
           <td>{{ "%.2f%%"|format(row.actual_share) if row.actual_share is not none else "Sin datos" }}</td>
-          <td class="comparison-period-start comparison-cell-previous">{{ "%.2f%%"|format(row.previous_share) if row.previous_share is not none else "Sin datos" }}</td>
-          <td class="comparison-delta comparison-cell-previous {% if row.previous_delta is not none and row.previous_delta > 0 %}is-positive{% elif row.previous_delta is not none and row.previous_delta < 0 %}is-negative{% endif %}">{{ "%+.2f pp"|format(row.previous_delta) if row.previous_delta is not none else "—" }}</td>
+          {% if show_previous %}<td class="comparison-period-start comparison-cell-previous">{{ "%.2f%%"|format(row.previous_share) if row.previous_share is not none else "Sin datos" }}</td>
+          <td class="comparison-delta comparison-cell-previous {% if row.previous_delta is not none and row.previous_delta > 0 %}is-positive{% elif row.previous_delta is not none and row.previous_delta < 0 %}is-negative{% endif %}">{{ "%+.2f pp"|format(row.previous_delta) if row.previous_delta is not none else "—" }}</td>{% endif %}
           <td class="comparison-period-start comparison-cell-year">{{ "%.2f%%"|format(row.year_share) if row.year_share is not none else "Sin datos" }}</td>
           <td class="comparison-delta comparison-cell-year {% if row.year_delta is not none and row.year_delta > 0 %}is-positive{% elif row.year_delta is not none and row.year_delta < 0 %}is-negative{% endif %}">{{ "%+.2f pp"|format(row.year_delta) if row.year_delta is not none else "—" }}</td>
         </tr>
-        {% else %}<tr><td colspan="7" class="empty-state">No hay datos para comparar.</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="{{ 7 if show_previous else 5 }}" class="empty-state">No hay datos para comparar.</td></tr>{% endfor %}
       </tbody>
     </table>
   </div>
@@ -49,11 +49,24 @@
 
 {% block content %}
 <section class="dashboard-shell">
-  <header class="dashboard-header"><div class="dashboard-title-block"><p class="eyebrow">Envío Monitor</p><h1 class="dashboard-title">Comparativo de participación</h1><p class="page-subtitle">Share del período actual frente al mes anterior y al mismo período del año anterior.</p></div></header>
+  <header class="dashboard-header">
+    <div class="dashboard-title-block"><p class="eyebrow">Envío Monitor</p><h1 class="dashboard-title">Comparativo de participación</h1><p class="page-subtitle">Share del período actual frente {% if show_previous %}al mes anterior y {% endif %}al mismo período del año anterior.</p></div>
+    <button class="button button-secondary print-button no-print" type="button" onclick="window.print()"><i class="bi bi-file-earmark-pdf" aria-hidden="true"></i> Exportar PDF</button>
+  </header>
+
+  <section class="print-filter-summary" aria-label="Filtros aplicados">
+    <strong>Filtros aplicados</strong>
+    <span>Período: {{ period_labels.actual }}</span>
+    <span>Canal: {{ filters.canales|join(", ") if filters.canales else "Todos" }}</span>
+    <span>Alcance: {{ filters.alcances|join(", ") if filters.alcances else "Todos" }}</span>
+    <span>Categoría: {{ filters.categorias|join(", ") if filters.categorias else "Todas" }}</span>
+    <span>Anunciante: {{ filters.anunciantes|join(", ") if filters.anunciantes else "Todos" }}</span>
+  </section>
 
   <section class="panel panel--tight">
     <form method="get" action="/comparativos" class="comparison-filter-grid">
-      <label class="field"><span class="field-label">Mes</span><input class="input" type="month" name="mes" value="{{ filters.mes }}" max="{{ max_month }}"></label>
+      <label class="field"><span class="field-label">Mes desde</span><input class="input" type="month" name="mes_desde" value="{{ filters.mes_desde }}" max="{{ max_month }}"></label>
+      <label class="field"><span class="field-label">Mes hasta</span><input class="input" type="month" name="mes_hasta" value="{{ filters.mes_hasta }}" max="{{ max_month }}"></label>
       {{ multi_filter("canal", "Canal", options.canales, filters.canales) }}
       {{ multi_filter("alcance", "Alcance", options.alcances, filters.alcances) }}
       {{ multi_filter("categoria", "Categoría", options.categorias, filters.categorias) }}
@@ -64,13 +77,13 @@
 
   <section class="comparison-periods">
     <span><strong>Actual:</strong> {{ period_labels.actual }}</span>
-    <span><strong>Mes anterior:</strong> {{ period_labels.anterior }}</span>
+    {% if show_previous %}<span><strong>Mes anterior:</strong> {{ period_labels.anterior }}</span>{% endif %}
     <span><strong>Año anterior:</strong> {{ period_labels.anual }}</span>
   </section>
 
-  {{ comparison_table("Alcances", tables.alcances, "alcances") }}
-  {{ comparison_table("Categorías", tables.categorias, "categorias") }}
-  {{ comparison_table("Anunciantes", tables.anunciantes, "anunciantes", True) }}
+  {{ comparison_table("Alcances", tables.alcances, "alcances", show_previous) }}
+  {{ comparison_table("Categorías", tables.categorias, "categorias", show_previous) }}
+  {{ comparison_table("Anunciantes", tables.anunciantes, "anunciantes", show_previous, True) }}
 </section>
 
 <script>

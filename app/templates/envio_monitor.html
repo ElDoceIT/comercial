@@ -35,8 +35,21 @@
     <div class="dashboard-meta">
       <span>última fecha incorporada:</span>
       <strong>{{ ultima_fecha_cargada.strftime("%d/%m/%Y") if ultima_fecha_cargada else "sin datos" }}</strong>
+      <button class="button button-secondary print-button no-print" type="button" onclick="window.print()"><i class="bi bi-file-earmark-pdf" aria-hidden="true"></i> Exportar PDF</button>
     </div>
   </header>
+
+  <section class="print-filter-summary" aria-label="Filtros aplicados">
+    <strong>Filtros aplicados</strong>
+    <span>Desde: {{ filters.fecha_desde or "Sin límite" }}</span>
+    <span>Hasta: {{ filters.fecha_hasta or "Sin límite" }}</span>
+    <span>Alcance: {{ filters.alcances|join(", ") if filters.alcances else "Todos" }}</span>
+    <span>Categoría: {{ filters.categorias|join(", ") if filters.categorias else "Todas" }}</span>
+    <span>Anunciante: {{ filters.anunciantes|join(", ") if filters.anunciantes else "Todos" }}</span>
+    <span>Tipo de día: {{ filters.tipos_dia|join(", ") if filters.tipos_dia else "Todos" }}</span>
+    {% if filters.prom_canal %}<span>Prom.Canal: {{ filters.prom_canal }}</span>{% endif %}
+    {% if filters.filtro_comercial %}<span>Filtro comercial: activo</span>{% endif %}
+  </section>
 
   <section class="dashboard-filters panel panel--tight">
     <form method="get" action="/envio-monitor" class="filter-grid">

@@ -1,5 +1,21 @@
 {% extends "base.html" %}
 
+{% macro multi_filter(name, label, options, selected_values) %}
+<div class="field multi-filter-field" data-export-dropdown>
+  <span class="field-label">{{ label }}</span>
+  <button class="input multi-dropdown-button" type="button" data-dropdown-toggle aria-expanded="false"><span data-dropdown-label>Todos</span><span aria-hidden="true">▾</span></button>
+  <div class="multi-dropdown-menu" data-dropdown-menu hidden>
+    <button class="button button-secondary select-all-button" type="button" data-toggle-all>Seleccionar todas</button>
+    <input class="input input--compact multi-dropdown-search" type="search" placeholder="Buscar">
+    <div class="multi-dropdown-options">
+      {% for item in options %}
+      <label class="multi-dropdown-option"><input type="checkbox" name="{{ name }}" value="{{ item }}" {% if not selected_values or item in selected_values %}checked{% endif %}><span>{{ item }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
 {% block title %}Exportaciones | Monitor Pautas{% endblock %}
 
 {% block content %}
@@ -29,6 +45,9 @@
       <span class="field-label">Fecha hasta</span>
       <input class="input" type="date" name="fecha_hasta" value="{{ fecha_hasta }}">
     </label>
+    {{ multi_filter("alcance", "Alcance", options.alcances, filters.alcances) }}
+    {{ multi_filter("categoria", "Categoría", options.categorias, filters.categorias) }}
+    {{ multi_filter("anunciante", "Anunciante", options.anunciantes, filters.anunciantes) }}
     <div class="filter-actions">
       <button class="button button-secondary" type="submit">Actualizar</button>
       <a class="button button-secondary" href="/exportaciones">Limpiar</a>
@@ -62,8 +81,8 @@
       <h2 class="panel-title">Cronogramas</h2>
     </div>
     <div class="panel-actions">
-      <a class="button" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=csv">CSV</a>
-      <a class="button button-secondary" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=xlsx">XLSX</a>
+      <a class="button" href="/exportaciones/cronogramas?{{ export_query }}{% if export_query %}&{% endif %}formato=csv">CSV</a>
+      <a class="button button-secondary" href="/exportaciones/cronogramas?{{ export_query }}{% if export_query %}&{% endif %}formato=xlsx">XLSX</a>
     </div>
   </div>
 </section>
@@ -75,9 +94,62 @@
       <h2 class="panel-title">Cronogramas completos</h2>
     </div>
     <div class="panel-actions">
-      <a class="button" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=csv&tipo=completa">CSV</a>
-      <a class="button button-secondary" href="/exportaciones/cronogramas?fecha_desde={{ fecha_desde }}&fecha_hasta={{ fecha_hasta }}&formato=xlsx&tipo=completa">XLSX</a>
+      <a class="button" href="/exportaciones/cronogramas?{{ export_query }}{% if export_query %}&{% endif %}formato=csv&tipo=completa">CSV</a>
+      <a class="button button-secondary" href="/exportaciones/cronogramas?{{ export_query }}{% if export_query %}&{% endif %}formato=xlsx&tipo=completa">XLSX</a>
     </div>
   </div>
 </section>
+
+<script>
+  function updateExportDropdown(dropdown) {
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const selected = checks.filter((check) => check.checked);
+    const label = dropdown.querySelector("[data-dropdown-label]");
+    const allButton = dropdown.querySelector("[data-toggle-all]");
+    if (label) label.textContent = selected.length === checks.length ? "Todos" : selected.length === 1 ? selected[0].value : `${selected.length} seleccionados`;
+    if (allButton) allButton.textContent = checks.every((check) => check.checked) ? "Deseleccionar todas" : "Seleccionar todas";
+  }
+
+  document.querySelectorAll("[data-export-dropdown]").forEach((dropdown) => {
+    const toggle = dropdown.querySelector("[data-dropdown-toggle]");
+    const menu = dropdown.querySelector("[data-dropdown-menu]");
+    const search = dropdown.querySelector(".multi-dropdown-search");
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    updateExportDropdown(dropdown);
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
+      toggle.setAttribute("aria-expanded", String(!menu.hidden));
+      if (!menu.hidden) search.focus();
+    });
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    checks.forEach((check) => check.addEventListener("change", () => updateExportDropdown(dropdown)));
+    dropdown.querySelector("[data-toggle-all]").addEventListener("click", () => {
+      const select = !checks.every((check) => check.checked);
+      checks.forEach((check) => { check.checked = select; });
+      updateExportDropdown(dropdown);
+    });
+    search.addEventListener("input", () => {
+      const query = search.value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      dropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => {
+        const text = option.textContent.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        option.hidden = query && !text.includes(query);
+      });
+    });
+  });
+
+  document.addEventListener("click", () => {
+    document.querySelectorAll("[data-export-dropdown]").forEach((dropdown) => {
+      dropdown.querySelector("[data-dropdown-menu]").hidden = true;
+      dropdown.querySelector("[data-dropdown-toggle]").setAttribute("aria-expanded", "false");
+    });
+  });
+
+  document.querySelector('form[action="/exportaciones"]')?.addEventListener("submit", () => {
+    document.querySelectorAll("[data-export-dropdown]").forEach((dropdown) => {
+      const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+      if (checks.length && checks.every((check) => check.checked)) checks.forEach((check) => { check.disabled = true; });
+    });
+  });
+</script>
 {% endblock %}
