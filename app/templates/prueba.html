@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}Prueba dinámica | Envío Monitor{% endblock %}
+
+{% macro multi_filter(name, label, options, selected_values) %}
+<div class="field prueba-multi" data-prueba-dropdown>
+  <span class="field-label">{{ label }}</span>
+  <button class="input multi-dropdown-button" type="button" data-dropdown-toggle><span data-dropdown-label>Todos</span><span>▾</span></button>
+  <div class="multi-dropdown-menu" data-dropdown-menu hidden>
+    <button class="button button-secondary select-all-button" type="button" data-toggle-all>Seleccionar todas</button>
+    <input class="input input--compact multi-dropdown-search" type="search" placeholder="Buscar">
+    <div class="multi-dropdown-options">
+      {% for item in options %}
+      <label class="multi-dropdown-option"><input type="checkbox" name="{{ name }}" value="{{ item }}" {% if not selected_values or item in selected_values %}checked{% endif %}><span>{{ item }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro prueba_value(item, valores, comparison_period) %}
+<div class="prueba-cell">
+  {% if comparison_period %}
+    <div class="prueba-metric-line prueba-metric-current"><small>Actual:</small><strong>{% if valores != 'share' %}{{ "{:,}".format(item.seconds).replace(",", ".") }} s{% endif %}{% if valores == 'ambos' %} · {% endif %}{% if valores != 'segundos' %}{{ "%.2f%%"|format(item.share) }}{% endif %}</strong></div>
+    {% if item.previous_seconds is none %}
+      <div class="prueba-metric-line prueba-metric-previous"><small>Anterior:</small><span>Sin datos</span></div>
+    {% else %}
+      <div class="prueba-metric-line prueba-metric-previous"><small>Anterior:</small><span>{% if valores != 'share' %}{{ "{:,}".format(item.previous_seconds).replace(",", ".") }} s{% endif %}{% if valores == 'ambos' %} · {% endif %}{% if valores != 'segundos' %}{{ "%.2f%%"|format(item.previous_share) }}{% endif %}</span></div>
+      <div class="prueba-variation-block">
+        <small>Variación:</small>
+        {% if valores != 'share' %}<div class="prueba-variation-row"><span>Segundos:</span><em class="{% if item.seconds_delta > 0 %}is-positive{% elif item.seconds_delta < 0 %}is-negative{% endif %}">{{ "%+d"|format(item.seconds_delta) }} s {% if item.seconds_delta_pct is not none %}({{ "%+.2f%%"|format(item.seconds_delta_pct) }}){% else %}<span class="prueba-no-base">(sin base de comparación)</span>{% endif %}</em></div>{% endif %}
+        {% if valores != 'segundos' %}<div class="prueba-variation-row"><span>Share:</span><em class="{% if item.share_delta > 0 %}is-positive{% elif item.share_delta < 0 %}is-negative{% endif %}">{{ "%+.2f pp"|format(item.share_delta) }}</em></div>{% endif %}
+      </div>
+    {% endif %}
+  {% else %}
+    {% if valores != 'share' %}<strong>{{ "{:,}".format(item.seconds).replace(",", ".") }} s</strong>{% endif %}
+    {% if valores != 'segundos' %}<span>{{ "%.2f%%"|format(item.share) }}</span>{% endif %}
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% block content %}
+<section class="dashboard-shell prueba-shell">
+  <header class="dashboard-header">
+    <div class="dashboard-title-block">
+      <p class="eyebrow">Laboratorio</p>
+      <h1 class="dashboard-title">Análisis dinámico</h1>
+      <p class="page-subtitle">Empezá con una pregunta simple y personalizá la tabla cuando lo necesites.</p>
+    </div>
+    <button class="button button-secondary print-button no-print" type="button" onclick="window.print()"><i class="bi bi-file-earmark-pdf" aria-hidden="true"></i> Exportar PDF</button>
+  </header>
+
+  <form id="prueba-analysis-form" method="get" action="/prueba" class="panel prueba-builder" data-prueba-form>
+    <div class="prueba-basic-controls">
+      <label class="field"><span class="field-label">Desde</span><input class="input" type="date" name="fecha_desde" value="{{ filters.fecha_desde }}" min="{{ min_fecha }}" max="{{ max_fecha }}"></label>
+      <label class="field"><span class="field-label">Hasta</span><input class="input" type="date" name="fecha_hasta" value="{{ filters.fecha_hasta }}" min="{{ min_fecha }}" max="{{ max_fecha }}"></label>
+      <button class="button" type="submit"><i class="bi bi-play-fill"></i> Aplicar</button>
+      <button class="button button-secondary" type="button" data-toggle-advanced aria-expanded="{{ 'true' if advanced_open else 'false' }}"><i class="bi bi-sliders"></i> Personalizar análisis</button>
+    </div>
+
+    <div class="prueba-advanced" data-advanced {% if not advanced_open %}hidden{% endif %}>
+      <fieldset class="prueba-hierarchy">
+        <legend class="field-label">Nivel de detalle</legend>
+        <div class="prueba-hierarchy-steps">
+          <label><input type="radio" name="nivel" value="alcance" {% if filters.nivel == 'alcance' %}checked{% endif %}><span>Alcance</span></label>
+          <i class="bi bi-chevron-right"></i>
+          <label><input type="radio" name="nivel" value="categoria" {% if filters.nivel == 'categoria' %}checked{% endif %}><span>+ Categoría</span></label>
+          <i class="bi bi-chevron-right"></i>
+          <label><input type="radio" name="nivel" value="anunciante" {% if filters.nivel == 'anunciante' %}checked{% endif %}><span>+ Anunciante</span></label>
+          <i class="bi bi-chevron-right"></i>
+          <label><input type="radio" name="nivel" value="producto" {% if filters.nivel == 'producto' %}checked{% endif %}><span>+ Producto</span></label>
+        </div>
+        <small>Cada nivel conserva los anteriores para que siempre puedas seguir el recorrido.</small>
+      </fieldset>
+      <div class="prueba-config-grid">
+        <label class="field"><span class="field-label">Columnas</span><select class="input" name="columnas"><option value="ninguna" {% if filters.columnas == 'ninguna' %}selected{% endif %}>Sin columnas</option>{% for key, label in dimensions.items() %}{% if key != 'producto' %}<option value="{{ key }}" {% if filters.columnas == key %}selected{% endif %}>{{ label }}</option>{% endif %}{% endfor %}</select></label>
+        <label class="field"><span class="field-label">Mostrar</span><select class="input" name="valores"><option value="ambos" {% if filters.valores == 'ambos' %}selected{% endif %}>Segundos y share</option><option value="segundos" {% if filters.valores == 'segundos' %}selected{% endif %}>Solo segundos</option><option value="share" {% if filters.valores == 'share' %}selected{% endif %}>Solo share</option></select></label>
+        <label class="field"><span class="field-label">Base del share</span><select class="input" name="base_share"><option value="fila" {% if filters.base_share == 'fila' %}selected{% endif %}>Total de cada fila</option><option value="columna" {% if filters.base_share == 'columna' %}selected{% endif %}>Total de cada columna</option><option value="general" {% if filters.base_share == 'general' %}selected{% endif %}>Total general</option></select></label>
+        <label class="field"><span class="field-label">Comparar con</span><select class="input" name="comparar"><option value="ninguno" {% if filters.comparar == 'ninguno' %}selected{% endif %}>Sin comparación</option><option value="anterior" {% if filters.comparar == 'anterior' %}selected{% endif %}>Período anterior</option><option value="anual" {% if filters.comparar == 'anual' %}selected{% endif %}>Mismo período del año anterior</option></select></label>
+      </div>
+      <div class="prueba-filter-grid">
+        {{ multi_filter("canal", "Canal", options.canales, filters.canales) }}
+        {{ multi_filter("alcance", "Alcance", options.alcances, filters.alcances) }}
+        {{ multi_filter("categoria", "Categoría", options.categorias, filters.categorias) }}
+        {{ multi_filter("anunciante", "Anunciante", options.anunciantes, filters.anunciantes) }}
+      </div>
+    </div>
+  </form>
+
+  <section class="panel prueba-result">
+    <div class="panel-header">
+      <div><p class="eyebrow">Resultado</p><h2 class="panel-title">{{ pivot.row_label }} por {{ pivot.column_label }}</h2></div>
+      <div class="prueba-total"><span>Universo analizado</span><strong>{{ "{:,}".format(pivot.grand_total).replace(",", ".") }} s</strong></div>
+    </div>
+    <p class="prueba-formula"><i class="bi bi-info-circle"></i> {{ base_description }}</p>
+    {% if comparison_period %}
+    <div class="prueba-comparison-period">
+      <span><strong>Actual:</strong> {{ current_period.from }}–{{ current_period.to }}</span>
+      <span><strong>{{ comparison_period.title }}:</strong> {{ comparison_period.from }}–{{ comparison_period.to }}</span>
+      {% if not comparison_period.has_data %}<span class="is-warning">No hay datos en el período comparativo.</span>{% endif %}
+    </div>
+    {% endif %}
+    {% if available_hierarchy|length > 1 %}
+    <div class="prueba-visible-levels" data-visible-levels>
+      <span class="field-label">Agrupar por</span>
+      {% for item in available_hierarchy %}
+      <label><input type="checkbox" name="dimension" value="{{ item.key }}" form="prueba-analysis-form" data-hierarchy-dimension {% if item.key in filters.dimensions %}checked{% endif %}><span><i class="bi bi-check2"></i>{{ item.label }}</span></label>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="table-wrap">
+      <table class="data-table prueba-table">
+        <thead><tr>{% for header in pivot.row_headers %}<th data-hierarchy-column="{{ loop.index0 }}">{{ header }}</th>{% endfor %}{% for column in pivot.columns %}<th>{{ column }}</th>{% endfor %}<th>Total</th></tr></thead>
+        <tbody>
+          {% for row in pivot.rows %}<tr>{% for label in row.labels %}<td class="prueba-hierarchy-cell prueba-level-{{ loop.index }}" data-hierarchy-column="{{ loop.index0 }}">{% if loop.last %}<strong>{{ label }}</strong>{% else %}{{ label }}{% endif %}</td>{% endfor %}
+            {% for cell in row.cells %}<td>{{ prueba_value(cell, filters.valores, comparison_period) }}</td>{% endfor %}
+            <td class="prueba-row-total">{{ prueba_value(row, filters.valores, comparison_period) }}</td></tr>
+          {% else %}<tr><td colspan="{{ pivot.columns|length + pivot.row_headers|length + 1 }}" class="empty-state">No hay datos para esta combinación.</td></tr>{% endfor %}
+        </tbody>
+        {% if pivot.rows %}<tfoot><tr><th colspan="{{ pivot.row_headers|length }}" data-hierarchy-total>Total</th>{% for total in pivot.column_totals %}<th>{{ "{:,}".format(total).replace(",", ".") }} s</th>{% endfor %}<th>{{ "{:,}".format(pivot.grand_total).replace(",", ".") }} s</th></tr></tfoot>{% endif %}
+      </table>
+    </div>
+  </section>
+</section>
+
+<script>
+  const form = document.querySelector("[data-prueba-form]");
+  const advanced = form?.querySelector("[data-advanced]");
+  const advancedToggle = form?.querySelector("[data-toggle-advanced]");
+  advancedToggle?.addEventListener("click", () => {
+    advanced.hidden = !advanced.hidden;
+    advancedToggle.setAttribute("aria-expanded", String(!advanced.hidden));
+  });
+  form?.querySelectorAll('input[name="nivel"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      document.querySelectorAll("[data-hierarchy-dimension]").forEach((item) => { item.disabled = true; });
+      form.requestSubmit();
+    });
+  });
+
+  const visibleLevels = document.querySelector("[data-visible-levels]");
+  visibleLevels?.querySelectorAll("[data-hierarchy-dimension]").forEach((toggle) => {
+    toggle.addEventListener("change", () => {
+      const checked = visibleLevels.querySelectorAll("[data-hierarchy-dimension]:checked");
+      if (!checked.length) {
+        toggle.checked = true;
+        return;
+      }
+      form.requestSubmit();
+    });
+  });
+
+  document.querySelectorAll("[data-prueba-dropdown]").forEach((dropdown) => {
+    const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]'));
+    const label = dropdown.querySelector("[data-dropdown-label]");
+    const menu = dropdown.querySelector("[data-dropdown-menu]");
+    const update = () => { const count = checks.filter((item) => item.checked).length; label.textContent = count === checks.length ? "Todos" : count === 1 ? checks.find((item) => item.checked).value : `${count} seleccionados`; };
+    dropdown.querySelector("[data-dropdown-toggle]").addEventListener("click", (event) => { event.stopPropagation(); menu.hidden = !menu.hidden; });
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    checks.forEach((check) => check.addEventListener("change", update));
+    dropdown.querySelector("[data-toggle-all]").addEventListener("click", () => { const select = !checks.every((item) => item.checked); checks.forEach((item) => { item.checked = select; }); update(); });
+    dropdown.querySelector(".multi-dropdown-search").addEventListener("input", (event) => { const query = event.target.value.toLowerCase(); dropdown.querySelectorAll(".multi-dropdown-option").forEach((option) => { option.hidden = !option.textContent.toLowerCase().includes(query); }); });
+    update();
+  });
+  document.addEventListener("click", () => document.querySelectorAll("[data-prueba-dropdown] [data-dropdown-menu]").forEach((menu) => { menu.hidden = true; }));
+  form?.addEventListener("submit", () => document.querySelectorAll("[data-prueba-dropdown]").forEach((dropdown) => { const checks = Array.from(dropdown.querySelectorAll('input[type="checkbox"]')); if (checks.length && checks.every((item) => item.checked)) checks.forEach((item) => { item.disabled = true; }); }));
+</script>
+{% endblock %}

@@ -2526,6 +2526,412 @@ def comparativos_view(
     )
 
 
+PIVOT_DIMENSIONS = {
+    "alcance": "Alcance",
+    "categoria": "Categoría",
+    "anunciante": "Anunciante",
+    "producto": "Producto",
+    "canal": "Canal",
+    "mes": "Mes",
+    "fecha": "Fecha",
+    "dia_semana": "Día de la semana",
+}
+HIERARCHY_DIMENSIONS = ("alcance", "categoria", "anunciante", "producto")
+
+
+@router.get("/prueba", response_class=HTMLResponse)
+def prueba_view(
+    request: Request,
+    db: Session = Depends(get_db),
+    fecha_desde: str | None = Query(default=None),
+    fecha_hasta: str | None = Query(default=None),
+    nivel: str = Query(default="alcance"),
+    dimension: list[str] | None = Query(default=None),
+    columnas: str = Query(default="canal"),
+    valores: str = Query(default="ambos"),
+    base_share: str = Query(default="fila"),
+    comparar: str = Query(default="ninguno"),
+    alcance: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    anunciante: list[str] | None = Query(default=None),
+    canal: list[str] | None = Query(default=None),
+):
+    max_fecha = db.query(func.max(Cronograma.fecha)).scalar() or date.today()
+    min_fecha = db.query(func.min(Cronograma.fecha)).scalar() or max_fecha
+    default_from = max(min_fecha, max_fecha - timedelta(days=29))
+    try:
+        parsed_from = date.fromisoformat(fecha_desde or "")
+    except ValueError:
+        parsed_from = default_from
+    try:
+        parsed_to = date.fromisoformat(fecha_hasta or "")
+    except ValueError:
+        parsed_to = max_fecha
+    parsed_from = min(max(parsed_from, min_fecha), max_fecha)
+    parsed_to = min(max(parsed_to, min_fecha), max_fecha)
+    if parsed_from > parsed_to:
+        parsed_from, parsed_to = parsed_to, parsed_from
+    fecha_desde = parsed_from.isoformat()
+    fecha_hasta = parsed_to.isoformat()
+
+    if nivel not in HIERARCHY_DIMENSIONS:
+        nivel = "alcance"
+    hierarchy_end = HIERARCHY_DIMENSIONS.index(nivel) + 1
+    available_hierarchy = list(HIERARCHY_DIMENSIONS[:hierarchy_end])
+    selected_hierarchy = [key for key in _clean_multi_values(dimension) if key in available_hierarchy]
+    if dimension is None or not selected_hierarchy:
+        selected_hierarchy = available_hierarchy
+    if columnas not in {*PIVOT_DIMENSIONS, "ninguna"} or columnas == "producto":
+        columnas = "canal"
+    if valores not in {"segundos", "share", "ambos"}:
+        valores = "ambos"
+    if base_share not in {"general", "fila", "columna"}:
+        base_share = "fila"
+    if comparar not in {"ninguno", "anterior", "anual"}:
+        comparar = "ninguno"
+
+    options = _get_envio_filter_options(db)
+    filters = {
+        "alcances": _normalize_all_selected(_clean_multi_values(alcance), options["alcances"]),
+        "categorias": _normalize_all_selected(_clean_multi_values(categoria), options["categorias"]),
+        "anunciantes": _normalize_all_selected(_clean_multi_values(anunciante), options["anunciantes"]),
+        "canales": _normalize_all_selected(_clean_multi_values(canal), options["canales"]),
+    }
+    pivot = _build_prueba_pivot(
+        db=db,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        row_dimensions=selected_hierarchy,
+        column_dimension=columnas,
+        base_share=base_share,
+        filters=filters,
+    )
+    comparison_period = None
+    if comparar != "ninguno":
+        if comparar == "anterior":
+            period_days = (parsed_to - parsed_from).days
+            comparison_to = parsed_from - timedelta(days=1)
+            comparison_from = comparison_to - timedelta(days=period_days)
+            comparison_title = "Período anterior"
+        else:
+            comparison_from = _shift_prueba_year(parsed_from)
+            comparison_to = _shift_prueba_year(parsed_to)
+            comparison_title = "Mismo período del año anterior"
+        comparison_pivot = _build_prueba_pivot(
+            db=db,
+            fecha_desde=comparison_from.isoformat(),
+            fecha_hasta=comparison_to.isoformat(),
+            row_dimensions=selected_hierarchy,
+            column_dimension=columnas,
+            base_share=base_share,
+            filters=filters,
+        )
+        pivot = _merge_prueba_comparison(pivot, comparison_pivot)
+        comparison_period = {
+            "title": comparison_title,
+            "from": comparison_from.strftime("%d/%m/%Y"),
+            "to": comparison_to.strftime("%d/%m/%Y"),
+            "has_data": comparison_pivot["grand_total"] > 0,
+        }
+    base_descriptions = {
+        "general": "Cada porcentaje usa como base todos los segundos del universo filtrado.",
+        "fila": "Cada porcentaje muestra cómo se distribuye el total de su fila entre las columnas.",
+        "columna": "Cada porcentaje muestra qué peso tiene la fila dentro del total de cada columna.",
+    }
+    return templates.TemplateResponse(
+        request,
+        "prueba.html",
+        {
+            "pivot": pivot,
+            "dimensions": PIVOT_DIMENSIONS,
+            "options": options,
+            "filters": {
+                **filters,
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+                "nivel": nivel,
+                "dimensions": selected_hierarchy,
+                "columnas": columnas,
+                "valores": valores,
+                "base_share": base_share,
+                "comparar": comparar,
+            },
+            "base_description": base_descriptions[base_share],
+            "comparison_period": comparison_period,
+            "current_period": {
+                "from": parsed_from.strftime("%d/%m/%Y"),
+                "to": parsed_to.strftime("%d/%m/%Y"),
+            },
+            "available_hierarchy": [
+                {"key": key, "label": PIVOT_DIMENSIONS[key]}
+                for key in available_hierarchy
+            ],
+            "advanced_open": bool(
+                nivel != "alcance"
+                or columnas != "canal"
+                or valores != "ambos"
+                or base_share != "fila"
+                or comparar != "ninguno"
+                or any(filters.values())
+            ),
+            "min_fecha": min_fecha.isoformat(),
+            "max_fecha": max_fecha.isoformat(),
+        },
+    )
+
+
+def _shift_prueba_year(value: date) -> date:
+    target_year = value.year - 1
+    target_day = min(value.day, calendar.monthrange(target_year, value.month)[1])
+    return value.replace(year=target_year, day=target_day)
+
+
+def _merge_prueba_comparison(
+    current: dict[str, object],
+    previous: dict[str, object],
+) -> dict[str, object]:
+    columns = list(current["columns"])
+    columns.extend(column for column in previous["columns"] if column not in columns)
+
+    def row_map(pivot: dict[str, object]) -> dict[tuple[str, ...], dict[str, object]]:
+        result = {}
+        for row in pivot["rows"]:
+            cells = {
+                column: cell
+                for column, cell in zip(pivot["columns"], row["cells"])
+            }
+            result[tuple(row["labels"])] = {**row, "cell_map": cells}
+        return result
+
+    current_rows = row_map(current)
+    previous_rows = row_map(previous)
+    has_previous_data = int(previous["grand_total"] or 0) > 0
+    merged_rows = []
+    all_keys = sorted(
+        current_rows.keys() | previous_rows.keys(),
+        key=lambda value: tuple(part.casefold() for part in value),
+    )
+    for key in all_keys:
+        current_row = current_rows.get(key)
+        previous_row = previous_rows.get(key)
+        cells = []
+        for column in columns:
+            current_cell = current_row["cell_map"].get(column) if current_row else None
+            previous_cell = previous_row["cell_map"].get(column) if previous_row else None
+            seconds = int(current_cell["seconds"] if current_cell else 0)
+            previous_seconds = int(previous_cell["seconds"] if previous_cell else 0)
+            share = float(current_cell["share"] if current_cell else 0)
+            previous_share = float(previous_cell["share"] if previous_cell else 0)
+            cells.append({
+                "seconds": seconds,
+                "share": share,
+                "previous_seconds": previous_seconds if has_previous_data else None,
+                "previous_share": previous_share if has_previous_data else None,
+                "seconds_delta": seconds - previous_seconds if has_previous_data else None,
+                "seconds_delta_pct": (
+                    (seconds - previous_seconds) / previous_seconds * 100
+                    if has_previous_data and previous_seconds
+                    else None
+                ),
+                "share_delta": share - previous_share if has_previous_data else None,
+            })
+        seconds = int(current_row["seconds"] if current_row else 0)
+        previous_seconds = int(previous_row["seconds"] if previous_row else 0)
+        share = float(current_row["share"] if current_row else 0)
+        previous_share = float(previous_row["share"] if previous_row else 0)
+        merged_rows.append({
+            "labels": list(key),
+            "cells": cells,
+            "seconds": seconds,
+            "share": share,
+            "previous_seconds": previous_seconds if has_previous_data else None,
+            "previous_share": previous_share if has_previous_data else None,
+            "seconds_delta": seconds - previous_seconds if has_previous_data else None,
+            "seconds_delta_pct": (
+                (seconds - previous_seconds) / previous_seconds * 100
+                if has_previous_data and previous_seconds
+                else None
+            ),
+            "share_delta": share - previous_share if has_previous_data else None,
+        })
+    current["columns"] = columns
+    current["rows"] = merged_rows
+    current["column_totals"] = [
+        next((total for name, total in zip(current["columns"], current["column_totals"]) if name == column), 0)
+        for column in columns
+    ]
+    current["comparison_grand_total"] = int(previous["grand_total"] or 0)
+    return current
+
+
+def _prueba_dimension_expression(key: str):
+    expressions = {
+        "alcance": _envio_alcance_expr(),
+        "categoria": _envio_categoria_expr(),
+        "anunciante": _envio_anunciante_expr(),
+        "canal": Cronograma.canal,
+        "mes": func.date_format(Cronograma.fecha, "%Y-%m"),
+        "fecha": Cronograma.fecha,
+        "dia_semana": Cronograma.dia_semana,
+    }
+    return expressions[key]
+
+
+def _prueba_dimension_label(key: str, value: object) -> str:
+    if value in {None, ""}:
+        return f"Sin {PIVOT_DIMENSIONS[key].lower()}"
+    if key == "fecha" and isinstance(value, date):
+        return value.strftime("%d/%m/%Y")
+    if key == "mes":
+        try:
+            parsed = datetime.strptime(str(value), "%Y-%m")
+            return f"{MONTH_LABELS[parsed.month]} {parsed.year}"
+        except ValueError:
+            pass
+    if key == "dia_semana":
+        try:
+            return WEEKDAY_LABELS.get(int(value), str(value))
+        except (TypeError, ValueError):
+            pass
+    return str(value).strip()
+
+
+def _build_prueba_pivot(
+    *,
+    db: Session,
+    fecha_desde: str,
+    fecha_hasta: str,
+    row_dimensions: list[str],
+    column_dimension: str,
+    base_share: str,
+    filters: dict[str, list[str]],
+) -> dict[str, object]:
+    # Pre-aggregate the airings before resolving products. This keeps the
+    # normalized text joins away from the large cronogramas table.
+    raw_dimensions = {"canal", "mes", "fecha", "dia_semana"}
+    entities = [Cronograma.producto, Cronograma.cod_prod]
+    group_expressions = [Cronograma.producto, Cronograma.cod_prod]
+    if column_dimension in raw_dimensions:
+        column_expr = _prueba_dimension_expression(column_dimension).label("pivot_column")
+        entities.append(column_expr)
+        group_expressions.append(column_expr)
+    duration_expr = func.sum(Cronograma.duracion).label("seconds")
+    entities.append(duration_expr)
+    query = db.query(*entities).select_from(Cronograma)
+    query = query.filter(Cronograma.fecha >= fecha_desde, Cronograma.fecha <= fecha_hasta)
+    if filters["canales"]:
+        query = query.filter(Cronograma.canal.in_(filters["canales"]))
+    raw_rows = query.group_by(*group_expressions).all()
+
+    master_rows = (
+        db.query(
+            MaestroProducto.id,
+            MaestroProducto.producto,
+            BaseAnunciante.anunciante,
+            BaseAnunciante.alcance,
+            BaseAnunciante.categoria,
+        )
+        .outerjoin(BaseAnunciante, MaestroProducto.id_anunciante == BaseAnunciante.id_anunciante)
+        .all()
+    )
+    metadata_by_id = {
+        int(item.id): {
+            "producto": str(item.producto or "Sin producto").strip(),
+            "anunciante": str(item.anunciante or item.producto or "Sin anunciante").strip(),
+            "alcance": str(item.alcance or ("Sin anunciante asignado" if not item.anunciante else "Sin alcance")).strip(),
+            "categoria": str(item.categoria or ("Sin anunciante asignado" if not item.anunciante else "Sin categoría")).strip(),
+        }
+        for item in master_rows
+    }
+    master_by_name = {
+        _normalize_match_text(item.producto): metadata_by_id[int(item.id)]
+        for item in master_rows
+    }
+    ids_by_code: dict[str, set[int]] = defaultdict(set)
+    for item in db.query(ProductoTema.cod_producto, ProductoTema.id_producto).filter(
+        ProductoTema.cod_producto.isnot(None),
+        func.trim(ProductoTema.cod_producto) != "",
+    ).all():
+        ids_by_code[_normalize_match_text(item.cod_producto)].add(int(item.id_producto))
+    master_by_code = {
+        code: metadata_by_id[next(iter(ids))]
+        for code, ids in ids_by_code.items()
+        if len(ids) == 1 and next(iter(ids)) in metadata_by_id
+    }
+
+    values: dict[tuple[tuple[str, ...], str], int] = defaultdict(int)
+    row_totals: dict[tuple[str, ...], int] = defaultdict(int)
+    column_totals: dict[str, int] = defaultdict(int)
+    column_order: list[str] = []
+    hierarchy_keys = tuple(row_dimensions)
+    for item in raw_rows:
+        product = str(item.producto or "").strip()
+        metadata = master_by_name.get(_normalize_match_text(product))
+        if metadata is None:
+            metadata = master_by_code.get(_normalize_match_text(item.cod_prod))
+        resolved = metadata or {
+            "producto": product or "Sin producto",
+            "anunciante": product or "Sin anunciante",
+            "alcance": "Sin anunciante asignado",
+            "categoria": "Sin anunciante asignado",
+        }
+        if filters["alcances"] and resolved["alcance"] not in filters["alcances"]:
+            continue
+        if filters["categorias"] and resolved["categoria"] not in filters["categorias"]:
+            continue
+        if filters["anunciantes"] and resolved["anunciante"] not in filters["anunciantes"]:
+            continue
+        row_key = tuple(resolved[key] for key in hierarchy_keys)
+        column_label = (
+            _prueba_dimension_label(
+                column_dimension,
+                item.pivot_column if column_dimension in raw_dimensions else resolved[column_dimension],
+            )
+            if column_dimension != "ninguna"
+            else "Total"
+        )
+        seconds = int(item.seconds or 0)
+        values[(row_key, column_label)] += seconds
+        row_totals[row_key] += seconds
+        column_totals[column_label] += seconds
+        if column_label not in column_order:
+            column_order.append(column_label)
+
+    grand_total = sum(row_totals.values())
+    if column_dimension == "canal":
+        preferred = ["Canal 8", "Telefe Córdoba", "Canal 10", "Canal 12"]
+        column_order.sort(key=lambda value: (preferred.index(value) if value in preferred else len(preferred), value))
+    else:
+        column_order.sort()
+
+    rows = []
+    for row_key in sorted(row_totals, key=lambda value: tuple(part.casefold() for part in value)):
+        cells = []
+        for column_label in column_order:
+            seconds = values[(row_key, column_label)]
+            denominator = {
+                "general": grand_total,
+                "fila": row_totals[row_key],
+                "columna": column_totals[column_label],
+            }[base_share]
+            cells.append({"seconds": seconds, "share": _percentage(seconds, denominator)})
+        rows.append({
+            "labels": list(row_key),
+            "cells": cells,
+            "seconds": row_totals[row_key],
+            "share": _percentage(row_totals[row_key], grand_total),
+        })
+    return {
+        "columns": column_order,
+        "rows": rows,
+        "column_totals": [column_totals[column] for column in column_order],
+        "grand_total": grand_total,
+        "row_label": " + ".join(PIVOT_DIMENSIONS[key] for key in hierarchy_keys),
+        "row_headers": [PIVOT_DIMENSIONS[key] for key in hierarchy_keys],
+        "column_label": PIVOT_DIMENSIONS.get(column_dimension, "Total"),
+    }
+
+
 def _get_comparison_base_rows(
     *,
     db: Session,
@@ -2725,6 +3131,7 @@ def alerta_comercial_detail_view(
         db,
         Cronograma.fecha,
         Cronograma.hora_inicio,
+        Cronograma.canal,
         func.sum(Cronograma.duracion).label("duracion_total"),
     )
     airing_rows = (
@@ -2733,7 +3140,7 @@ def alerta_comercial_detail_view(
             Cronograma.canal == canal,
             Cronograma.fecha.isnot(None),
         )
-        .group_by(Cronograma.fecha, Cronograma.hora_inicio)
+        .group_by(Cronograma.fecha, Cronograma.hora_inicio, Cronograma.canal)
         .order_by(Cronograma.fecha.asc(), Cronograma.hora_inicio.asc())
         .all()
     )
@@ -2741,6 +3148,7 @@ def alerta_comercial_detail_view(
         {
             "fecha": row.fecha,
             "hora_inicio": row.hora_inicio or "—",
+            "canal": row.canal or "Sin canal",
             "duracion_total": int(row.duracion_total or 0),
             "mes": f"{MONTH_LABELS[row.fecha.month]} {row.fecha.year}",
         }

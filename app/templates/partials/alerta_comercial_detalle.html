@@ -27,7 +27,7 @@
     <h3>Emisiones por fecha y hora · {{ canal }}</h3>
     <div class="table-wrap">
       <table class="data-table">
-        <thead><tr><th>Fecha</th><th>Hora inicio</th><th>Duración</th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Hora inicio</th><th>Canal</th><th>Duración</th></tr></thead>
         <tbody>
           {% set grouping = namespace(mes=None, mes_index=0, mes_id='') %}
           {% for row in airing_rows %}
@@ -35,16 +35,16 @@
           {% set grouping.mes_index = grouping.mes_index + 1 %}
           {% set grouping.mes_id = 'detail-month-' ~ grouping.mes_index %}
           <tr class="alert-detail-month" tabindex="0" role="button" aria-expanded="false" data-alert-month-toggle="{{ grouping.mes_id }}">
-            <td colspan="3">
+            <td colspan="4">
               <span><i class="bi bi-chevron-right" aria-hidden="true"></i> {{ row.mes }}</span>
               <span class="alert-detail-month-total">Subtotal: {{ "{:,}".format(row.mes_duracion_total).replace(",", ".") }} s</span>
             </td>
           </tr>
           {% set grouping.mes = row.mes %}
           {% endif %}
-          <tr data-alert-month-child="{{ grouping.mes_id }}" hidden><td>{{ row.fecha.strftime("%d/%m/%Y") }}</td><td>{{ row.hora_inicio }}</td><td>{{ "{:,}".format(row.duracion_total or 0).replace(",", ".") }} s</td></tr>
+          <tr data-alert-month-child="{{ grouping.mes_id }}" hidden><td>{{ row.fecha.strftime("%d/%m/%Y") }}</td><td>{{ row.hora_inicio }}</td><td>{{ row.canal }}</td><td>{{ "{:,}".format(row.duracion_total or 0).replace(",", ".") }} s</td></tr>
           {% else %}
-          <tr><td colspan="3" class="empty-state">No hay emisiones para mostrar.</td></tr>
+          <tr><td colspan="4" class="empty-state">No hay emisiones para mostrar.</td></tr>
           {% endfor %}
         </tbody>
       </table>
